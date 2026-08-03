@@ -1,0 +1,221 @@
+/** LLMGate billing-overview quota client. */
+
+import type { QuotaError } from "./types.js";
+import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
+import { clampPercent } from "./format-utils.js";
+import { fetchWithTimeout } from "./http.js";
+import { getAuthPaths, readAuthFile } from "./opencode-auth.js";
+
+const LLMGATE_BILLING_OVERVIEW_URL = "https://llmgate.app/api/v1/billing/overview";
+const USER_AGENT = "OpenCode-Quota-Toast/1.0";
+export const LLMGATE_ACCESS_TOKEN_METADATA_KEY = "llmgate_access_token";
+export const LLMGATE_REFRESH_TOKEN_METADATA_KEY = "llmgate_refresh_token";
+
+export interface LlmGateQuotaWindow {
+  limit: number;
+  used: number;
+  remaining: number;
+  percentRemaining: number;
+  resetTimeIso?: string;
+}
+
+export interface LlmGateQuotaSuccess {
+  success: true;
+  planCode?: string;
+  planName?: string;
+  planStatus?: string;
+  creditBalance?: number;
+  windows: {
+    fiveHour?: LlmGateQuotaWindow;
+    weekly?: LlmGateQuotaWindow;
+  };
+}
+
+export type LlmGateQuotaResult = LlmGateQuotaSuccess | QuotaError | null;
+
+interface LlmGateAuthTokens {
+  accessToken: string;
+  refreshToken: string;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function authMetadataFromAuth(auth: unknown): {
+  accessToken?: string;
+  refreshToken?: string;
+} {
+  const entry = asRecord(asRecord(auth).llmgate);
+  if (entry.type !== "api") return {};
+  const metadata = asRecord(entry.metadata);
+  return {
+    accessToken: nonEmptyString(metadata[LLMGATE_ACCESS_TOKEN_METADATA_KEY]),
+    refreshToken: nonEmptyString(metadata[LLMGATE_REFRESH_TOKEN_METADATA_KEY]),
+  };
+}
+
+function authTokensFromAuth(auth: unknown): LlmGateAuthTokens | undefined {
+  const metadata = authMetadataFromAuth(auth);
+  if (!metadata.accessToken || !metadata.refreshToken) return undefined;
+  return { accessToken: metadata.accessToken, refreshToken: metadata.refreshToken };
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  if (typeof value === "boolean" || value === null || value === undefined) return undefined;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function resetTimeIso(value: unknown): string | undefined {
+  const unix = finiteNumber(value);
+  if (unix === undefined || unix <= 0) return undefined;
+  const milliseconds = unix * 1000;
+  return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : undefined;
+}
+
+function parseWindow(value: unknown): LlmGateQuotaWindow | undefined {
+  const record = asRecord(value);
+  const limit = finiteNumber(record.limit);
+  const used = finiteNumber(record.used);
+  const reportedRemaining = finiteNumber(record.remaining);
+  if (limit === undefined || !Number.isFinite(limit) || limit <= 0 || used === undefined || used < 0) {
+    return undefined;
+  }
+  const remaining = reportedRemaining !== undefined && reportedRemaining >= 0
+    ? reportedRemaining
+    : Math.max(0, limit - used);
+  return {
+    limit,
+    used,
+    remaining,
+    percentRemaining: clampPercent((remaining / limit) * 100),
+    resetTimeIso: resetTimeIso(record.reset_at_unix),
+  };
+}
+
+function parseOverview(payload: unknown): LlmGateQuotaSuccess | QuotaError {
+  const data = asRecord(asRecord(payload).data);
+  if (Object.keys(data).length === 0) {
+    return { success: false, error: "LLMGate billing response returned an unexpected response shape" };
+  }
+
+  const quota = asRecord(data.usage_quota);
+  const fiveHour = parseWindow(quota.five_hour);
+  const weekly = parseWindow(quota.weekly);
+  if (!fiveHour && !weekly) {
+    return { success: false, error: "LLMGate billing response has no reportable usage quota windows" };
+  }
+
+  return {
+    success: true,
+    ...(nonEmptyString(data.plan_code) ? { planCode: nonEmptyString(data.plan_code) } : {}),
+    ...(nonEmptyString(data.plan_name) ? { planName: nonEmptyString(data.plan_name) } : {}),
+    ...(nonEmptyString(data.status) ? { planStatus: nonEmptyString(data.status) } : {}),
+    ...(finiteNumber(data.credit_balance) !== undefined ? { creditBalance: finiteNumber(data.credit_balance) } : {}),
+    windows: {
+      ...(fiveHour ? { fiveHour } : {}),
+      ...(weekly ? { weekly } : {}),
+    },
+  };
+}
+
+async function fetchOverview(
+  auth: LlmGateAuthTokens,
+  requestTimeoutMs?: number,
+): Promise<
+  | { state: "success"; data: LlmGateQuotaSuccess }
+  | { state: "unauthorized" }
+  | { state: "failed"; error: string }
+> {
+  try {
+    const response = await fetchWithTimeout(
+      LLMGATE_BILLING_OVERVIEW_URL,
+      {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${auth.accessToken}`,
+          "User-Agent": USER_AGENT,
+        },
+      },
+      requestTimeoutMs,
+    );
+    if (response.status === 401 || response.status === 403) return { state: "unauthorized" };
+    if (!response.ok) {
+      return {
+        state: "failed",
+        error: `LLMGate API error ${response.status}: ${sanitizeDisplaySnippet(await response.text(), 120)}`,
+      };
+    }
+    const parsed = parseOverview(await response.json());
+    return parsed.success ? { state: "success", data: parsed } : { state: "failed", error: parsed.error };
+  } catch (error) {
+    return {
+      state: "failed",
+      error: sanitizeDisplayText(error instanceof Error ? error.message : String(error)),
+    };
+  }
+}
+
+export async function queryLlmGateQuota(
+  options: { requestTimeoutMs?: number } = {},
+): Promise<LlmGateQuotaResult> {
+  let auth: LlmGateAuthTokens | undefined;
+  try {
+    auth = authTokensFromAuth(await readAuthFile());
+  } catch {
+    return null;
+  }
+  if (!auth) return null;
+
+  // Provider owns login and renewal. Quota only accepts a complete login pair,
+  // never reads a gateway credential, and never refreshes tokens itself.
+  const result = await fetchOverview(auth, options.requestTimeoutMs);
+  if (result.state === "success") return result.data;
+  if (result.state === "unauthorized") {
+    return {
+      success: false,
+      error: "LLMGate access token was rejected. Run /connect to sign in again.",
+    };
+  }
+  return { success: false, error: result.error };
+}
+
+export async function hasLlmGateAuthTokens(): Promise<boolean> {
+  try {
+    return Boolean(authTokensFromAuth(await readAuthFile()));
+  } catch {
+    return false;
+  }
+}
+
+export async function getLlmGateAuthDiagnostics(): Promise<{
+  configured: boolean;
+  accessTokenConfigured: boolean;
+  refreshTokenConfigured: boolean;
+  authPaths: string[];
+}> {
+  try {
+    const metadata = authMetadataFromAuth(await readAuthFile());
+    return {
+      configured: Boolean(metadata.accessToken && metadata.refreshToken),
+      accessTokenConfigured: Boolean(metadata.accessToken),
+      refreshTokenConfigured: Boolean(metadata.refreshToken),
+      authPaths: getAuthPaths(),
+    };
+  } catch {
+    return {
+      configured: false,
+      accessTokenConfigured: false,
+      refreshTokenConfigured: false,
+      authPaths: getAuthPaths(),
+    };
+  }
+}

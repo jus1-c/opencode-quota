@@ -132,7 +132,7 @@ Run `/quota_status` and check the Alibaba auth, resolved tier, state-file path, 
 </details>
 
 <details>
-<summary><strong>MiniMax, Kimi, Chutes AI, Synthetic, Z.ai, Zhipu, NanoGPT, and DeepSeek</strong></summary>
+<summary><strong>MiniMax, Kimi, Chutes AI, Synthetic, Z.ai, Zhipu, NanoGPT, DeepSeek, and LLMGate</strong></summary>
 
 These providers use trusted env vars, trusted user/global OpenCode config, or native OpenCode auth. Run `/quota_status` and check the provider-specific API-key diagnostics.
 
@@ -147,6 +147,7 @@ These providers use trusted env vars, trusted user/global OpenCode config, or na
 | Zhipu Coding Plan        | Use `ZHIPU_API_KEY` or `ZHIPU_CODING_PLAN_API_KEY`; malformed fallback auth is surfaced as an auth error.                                                                                                                             |
 | NanoGPT                  | Use `NANOGPT_API_KEY`, `NANO_GPT_API_KEY`, trusted user/global config, or OpenCode auth.                                                                                                                                              |
 | DeepSeek                 | Use `DEEPSEEK_API_KEY`, trusted user/global config under `provider.deepseek.options.apiKey`, or OpenCode auth. This provider shows balance only because DeepSeek does not expose a quota reset window.                                |
+| LLMGate                  | Install/configure the separate LLMGate provider, run `/connect`, then check the `llmgate` section in `/quota_status`. Provider `/connect` uses a loopback-only local sign-in form, lets you select an active API key, keeps the gateway key in a keychain cache, and saves username/password plus the selected key ID in a device-bound encrypted local file for recovery. OpenCode auth metadata stores access/refresh data for quota only. `opencode-quota` does not accept `LLMGATE_API_KEY` or configure LLMGate models. Complete Turnstile in the LLMGate dashboard; neither component bypasses it. |
 
 For security, repo-local `opencode.json` / `opencode.jsonc` is ignored for provider secrets in these integrations. Put secrets in environment variables or trusted user/global config. OpenCode auth fallbacks for API-key providers require `{ "type": "api", "key": "..." }` entries.
 

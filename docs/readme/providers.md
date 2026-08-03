@@ -28,6 +28,7 @@ Most providers work automatically. If a provider has a “Needs setup” link, o
 | Zhipu Coding Plan | OpenCode config | Remote API | Usage/quota |
 | NanoGPT | API key/config | Remote API | Usage + balance |
 | DeepSeek | API key/config | Remote API | Balance/status |
+| LLMGate | [Needs setup](#llmgate) | Remote API | 5h/weekly quota |
 | Ollama Cloud | [Needs setup](#ollama-cloud) | Dashboard scraping | Dashboard usage |
 | OpenCode Go | [Needs setup](#opencode-go) | Dashboard scraping | Dashboard usage |
 
@@ -138,6 +139,34 @@ Or put the key in trusted user/global OpenCode config, not repo-local config:
 If you use manual provider selection, include `deepseek` in `enabledProviders`.
 
 
+<a id="llmgate"></a>
+### LLMGate
+
+LLMGate provider setup is separate from `opencode-quota`. Install and configure
+the LLMGate provider plugin before connecting it.
+
+Connect LLMGate from OpenCode:
+
+```text
+/connect
+```
+
+Choose **Sign in to LLMGate**. Open the loopback-only local link, enter the
+username/email and password there, then select an active LLMGate API key. The
+provider keeps the selected gateway key in the OS keychain cache and stores the
+username/password plus selected key ID in a device-bound encrypted local file.
+Later `/connect` runs can use the saved account to reauthenticate. OpenCode auth
+metadata contains only the access/refresh token pair, never the username/password.
+
+`opencode-quota` reads only that access/refresh token pair to request billing
+quota. It does not register LLMGate models, perform login, read gateway API keys,
+or manage keychain entries. In manual quota selection mode, include `llmgate` in
+`enabledProviders`.
+
+If LLMGate requires Turnstile, complete it in the LLMGate dashboard before
+signing in. Neither provider nor quota plugin bypasses Turnstile.
+
+
 <a id="ollama-cloud"></a>
 ### Ollama Cloud
 
@@ -166,4 +195,3 @@ export OPENCODE_GO_AUTH_COOKIE="your-auth-cookie"
 ```
 
 Use `opencodeGoWindows` to choose **5h**, **Weekly**, and/or **Monthly** windows. Environment variables take precedence over the optional `opencode-go.json` file.
-

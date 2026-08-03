@@ -37,6 +37,7 @@ describe("provider model matching helpers", () => {
   it("matches canonical runtime ids for provider prefixes", () => {
     expect(modelProviderMatchesRuntimeId("nanogpt/gpt-oss", "nanogpt")).toBe(true);
     expect(modelProviderMatchesRuntimeId("nano-gpt/gpt-oss", "nanogpt")).toBe(true);
+    expect(modelProviderMatchesRuntimeId("llmgate/gpt-5", "llmgate")).toBe(true);
     expect(modelProviderMatchesRuntimeId("openai/gpt-4.1", "nanogpt")).toBe(false);
   });
 

@@ -140,6 +140,13 @@ describe("provider-metadata", () => {
         quota: "remote_api",
       },
       {
+        id: "llmgate",
+        autoSetup: "yes",
+        authentication: "opencode_auth_oauth_token",
+        quota: "remote_api",
+        notes: "separate provider caches gateway credential in OS keychain and stores access/refresh tokens in OpenCode auth metadata",
+      },
+      {
         id: "opencode-go",
         autoSetup: "needs_quick_setup",
         authentication: "state_only",
@@ -223,6 +230,7 @@ describe("provider-metadata", () => {
       "kimi-code",
     ]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.deepseek).toEqual(["deepseek"]);
+    expect(QUOTA_PROVIDER_RUNTIME_IDS.llmgate).toEqual(["llmgate"]);
   });
 
   it("keeps runtime ids distinct from broad normalization aliases", () => {

@@ -17,6 +17,7 @@ export type CanonicalQuotaProviderId =
   | "minimax-china-coding-plan"
   | "kimi-for-coding"
   | "deepseek"
+  | "llmgate"
   | "opencode-go"
   | "ollama-cloud";
 
@@ -72,6 +73,7 @@ export const QUOTA_PROVIDER_LABELS: Readonly<Record<string, string>> = {
   "kimi-for-coding": "Kimi Code",
   "kimi-code": "Kimi Code",
   deepseek: "DeepSeek",
+  llmgate: "LLMGate",
   "opencode-go": "OpenCode Go",
   "ollama-cloud": "Ollama Cloud",
 };
@@ -96,6 +98,7 @@ export const QUOTA_PROVIDER_ID_SYNONYMS: Readonly<Record<string, string>> = {
   "kimi-for-code": "kimi-for-coding",
   "kimi-code": "kimi-for-coding",
   "deep-seek": "deepseek",
+  "llm-gate": "llmgate",
   "opencode-go-subscription": "opencode-go",
   "gemini-cli": "google-gemini-cli",
   "google-gemini": "google-gemini-cli",
@@ -142,6 +145,7 @@ export const QUOTA_PROVIDER_RUNTIME_IDS: QuotaProviderRuntimeIds = {
   ],
   "kimi-for-coding": ["kimi-for-coding", "kimi", "kimi-code"],
   deepseek: ["deepseek"],
+  llmgate: ["llmgate"],
   "opencode-go": ["opencode-go"],
   "ollama-cloud": ["ollama-cloud"],
 };
@@ -278,6 +282,13 @@ export const QUOTA_PROVIDER_SHAPES: readonly QuotaProviderShape[] = [
     authentication: "opencode_auth_api_key",
     authFallbacks: ["env_api_key", "global_opencode_config"],
     quota: "remote_api",
+  },
+  {
+    id: "llmgate",
+    autoSetup: "yes",
+    authentication: "opencode_auth_oauth_token",
+    quota: "remote_api",
+    notes: "separate provider caches gateway credential in OS keychain and stores access/refresh tokens in OpenCode auth metadata",
   },
   {
     id: "opencode-go",

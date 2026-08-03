@@ -26,6 +26,7 @@ import {
 import { opencodeGoProvider } from "./opencode-go.js";
 import { kimiCodeProvider } from "./kimi-code.js";
 import { deepseekProvider } from "./deepseek.js";
+import { llmGateProvider } from "./llmgate.js";
 import { ollamaCloudProvider } from "./ollama-cloud.js";
 
 export function getProviders(): QuotaProvider[] {
@@ -49,6 +50,7 @@ export function getProviders(): QuotaProvider[] {
     minimaxChinaCodingPlanProvider,
     kimiCodeProvider,
     deepseekProvider,
+    llmGateProvider,
     opencodeGoProvider,
     ollamaCloudProvider,
   ];

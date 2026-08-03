@@ -108,7 +108,9 @@ export interface QuotaProviderMatchContext {
 export interface QuotaProviderContext {
   client: {
     config: {
-      providers: () => Promise<{ data?: { providers: Array<{ id: string }> } }>;
+      providers: () => Promise<{
+        data?: { providers: Array<{ id: string; models?: Record<string, unknown> }> };
+      }>;
       get: () => Promise<{ data?: { model?: string } }>;
     };
   };

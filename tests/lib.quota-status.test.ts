@@ -168,6 +168,15 @@ const deepSeekMocks = vi.hoisted(() => ({
   })),
 }));
 
+const llmGateMocks = vi.hoisted(() => ({
+  getLlmGateAuthDiagnostics: vi.fn(async () => ({
+    configured: false,
+    accessTokenConfigured: false,
+    refreshTokenConfigured: false,
+    authPaths: ["/tmp/auth.json"],
+  })),
+}));
+
 const syntheticMocks = vi.hoisted(() => ({
   getSyntheticKeyDiagnostics: vi.fn(async () => ({
     configured: false,
@@ -286,6 +295,10 @@ vi.mock("../src/lib/nanogpt.js", () => ({
 
 vi.mock("../src/lib/deepseek.js", () => ({
   getDeepSeekKeyDiagnostics: deepSeekMocks.getDeepSeekKeyDiagnostics,
+}));
+
+vi.mock("../src/lib/llmgate.js", () => ({
+  getLlmGateAuthDiagnostics: llmGateMocks.getLlmGateAuthDiagnostics,
 }));
 
 vi.mock("../src/lib/copilot.js", () => ({
@@ -425,6 +438,7 @@ vi.mock("../src/providers/registry.js", () => ({
     { id: "synthetic" },
     { id: "nanogpt" },
     { id: "deepseek" },
+    { id: "llmgate" },
     { id: "kimi-for-coding" },
     { id: "kimi-code" },
   ],
@@ -1229,6 +1243,24 @@ describe("buildQuotaStatusReport", () => {
     expect(report).toContain("- deepseek: pricing=no (account balance only (not token-priced))");
   });
 
+  it("reports LLMGate login-token diagnostics", async () => {
+    llmGateMocks.getLlmGateAuthDiagnostics.mockResolvedValueOnce({
+      configured: true,
+      accessTokenConfigured: true,
+      refreshTokenConfigured: true,
+      authPaths: ["/tmp/auth.json"],
+    });
+
+    const report = await buildProviderStatusReport("llmgate");
+
+    expect(report).toContain("llmgate:");
+    expect(report).toContain("- quota_token_pair: configured");
+    expect(report).toContain("- access_token_metadata: configured");
+    expect(report).toContain("- refresh_token_metadata: configured");
+    expect(report).toContain("- auth_paths: /tmp/auth.json");
+    expect(report).toContain("- llmgate: pricing=no (dashboard credit quota (not token-priced))");
+  });
+
   it("reports OpenCode Go rolling, weekly, and monthly live usage when configured", async () => {
     openCodeGoMocks.getOpenCodeGoConfigDiagnostics.mockResolvedValueOnce({
       state: "configured",
@@ -1750,6 +1782,7 @@ zhipu:
 synthetic:
 chutes:
 deepseek:
+llmgate:
 nanogpt:
 copilot_quota_auth:
 google_antigravity:

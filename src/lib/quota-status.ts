@@ -13,6 +13,7 @@ import { getAnthropicDiagnostics } from "./anthropic.js";
 import { getChutesKeyDiagnostics } from "./chutes.js";
 import { getNanoGptKeyDiagnostics, queryNanoGptQuota } from "./nanogpt.js";
 import { getDeepSeekKeyDiagnostics } from "./deepseek.js";
+import { getLlmGateAuthDiagnostics } from "./llmgate.js";
 import { getSyntheticKeyDiagnostics } from "./synthetic.js";
 import { getCopilotQuotaAuthDiagnostics } from "./copilot.js";
 import {
@@ -516,6 +517,14 @@ function supportedProviderPricingRow(params: {
       id,
       pricing: "no",
       notes: "account balance only (not token-priced)",
+    };
+  }
+
+  if (id === "llmgate") {
+    return {
+      id,
+      pricing: "no",
+      notes: "dashboard credit quota (not token-priced)",
     };
   }
 
@@ -1331,6 +1340,16 @@ export async function buildQuotaStatusReport(params: {
   ];
   appendProviderCompactLiveProbeRows(deepSeekRows, "deepseek", params.providerLiveProbes);
   sections.push(createKvSection("deepseek", "deepseek:", deepSeekRows));
+
+  const llmGateDiag = await getLlmGateAuthDiagnostics();
+  const llmGateRows: ReportKvRow[] = [
+    { key: "quota_token_pair", value: llmGateDiag.configured ? "configured" : "(none)" },
+    { key: "access_token_metadata", value: llmGateDiag.accessTokenConfigured ? "configured" : "(none)" },
+    { key: "refresh_token_metadata", value: llmGateDiag.refreshTokenConfigured ? "configured" : "(none)" },
+    { key: "auth_paths", value: joinOrNone(llmGateDiag.authPaths) },
+  ];
+  appendProviderCompactLiveProbeRows(llmGateRows, "llmgate", params.providerLiveProbes);
+  sections.push(createKvSection("llmgate", "llmgate:", llmGateRows));
 
   // === nanogpt ===
   const nanoGptDiag = await readApiKeyDiagnosticsWithAuthPaths(getNanoGptKeyDiagnostics);
