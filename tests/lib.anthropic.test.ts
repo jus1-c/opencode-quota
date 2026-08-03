@@ -443,69 +443,13 @@ describe("Claude CLI diagnostics", () => {
     expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(1);
   });
 
-  it("falls back to macOS Keychain Claude OAuth credentials when local Claude auth omits quota windows", async () => {
-    setProcessPlatform("darwin");
+  it("falls back to the Claude credentials file when local Claude auth omits quota windows", async () => {
+    setProcessPlatform("linux");
     mockExecSequence([
       { stdout: "claude 1.2.3\n" },
       {
         stdout: JSON.stringify({
           authenticated: true,
-        }),
-      },
-      {
-        stdout: JSON.stringify({
-          claudeAiOauth: {
-            accessToken: "oauth-access-token-from-keychain",
-          },
-        }),
-      },
-    ]);
-    fetchWithTimeoutMock.mockResolvedValue(
-      mockJsonResponse({
-        oauth_usage: {
-          fiveHour: {
-            usedPercent: 25,
-            resetAt: "2026-03-25T18:00:00.000Z",
-          },
-          sevenDay: {
-            usedPercent: 40,
-            resetAt: "2026-04-01T00:00:00.000Z",
-          },
-        },
-      }),
-    );
-
-    const diagnostics = await getAnthropicDiagnostics();
-    expect(diagnostics.quotaSupported).toBe(true);
-    expect(diagnostics.quotaSource).toBe("claude-credentials-oauth-api");
-    expect(diagnostics.quota?.five_hour.percentRemaining).toBe(75);
-    expect(diagnostics.quota?.seven_day.percentRemaining).toBe(60);
-    expect(fetchWithTimeoutMock).toHaveBeenCalledWith(
-      ANTHROPIC_USAGE_URL,
-      {
-        headers: {
-          Authorization: "Bearer oauth-access-token-from-keychain",
-          "anthropic-beta": "oauth-2025-04-20",
-        },
-      },
-      undefined,
-    );
-    expect(readFileMock).not.toHaveBeenCalled();
-    expect(execFileMock).toHaveBeenCalledTimes(3);
-  });
-
-  it("falls back to the Claude credentials file when the macOS Keychain entry is unusable", async () => {
-    setProcessPlatform("darwin");
-    mockExecSequence([
-      { stdout: "claude 1.2.3\n" },
-      {
-        stdout: JSON.stringify({
-          authenticated: true,
-        }),
-      },
-      {
-        stdout: JSON.stringify({
-          claudeAiOauth: {},
         }),
       },
     ]);
@@ -540,7 +484,7 @@ describe("Claude CLI diagnostics", () => {
       undefined,
     );
     expect(readFileMock).toHaveBeenCalledTimes(1);
-    expect(execFileMock).toHaveBeenCalledTimes(3);
+    expect(execFileMock).toHaveBeenCalledTimes(2);
   });
 
   it("returns no quota when the Claude OAuth fallback credentials are unavailable", async () => {
@@ -582,7 +526,7 @@ describe("Claude CLI diagnostics", () => {
     expect(readFileMock).toHaveBeenCalledTimes(1);
   });
 
-  it("includes the macOS Keychain source when Claude OAuth fallback credentials are unavailable on macOS", async () => {
+  it("reports the Claude credentials file when OAuth fallback credentials are unavailable", async () => {
     setProcessPlatform("darwin");
     mockExecSequence([
       { stdout: "claude 1.2.3\n" },
@@ -590,10 +534,6 @@ describe("Claude CLI diagnostics", () => {
         stdout: JSON.stringify({
           authenticated: true,
         }),
-      },
-      {
-        code: 44,
-        stderr: "The specified item could not be found in the keychain.",
       },
     ]);
     readFileMock.mockRejectedValue(
@@ -604,18 +544,16 @@ describe("Claude CLI diagnostics", () => {
 
     const diagnostics = await getAnthropicDiagnostics();
     expect(diagnostics.quotaSupported).toBe(false);
-    expect(diagnostics.message).toContain("Claude Code-credentials");
     expect(diagnostics.message).toContain(".claude/.credentials.json");
 
     const quota = await queryAnthropicQuota();
     expect(quota?.success).toBe(false);
     if (quota && !quota.success) {
-      expect(quota.error).toContain("Claude Code-credentials");
       expect(quota.error).toContain(".claude/.credentials.json");
     }
     expect(fetchWithTimeoutMock).not.toHaveBeenCalled();
     expect(readFileMock).toHaveBeenCalledTimes(1);
-    expect(execFileMock).toHaveBeenCalledTimes(3);
+    expect(execFileMock).toHaveBeenCalledTimes(2);
   });
 
   it("returns no quota when the Claude OAuth fallback access token is malformed", async () => {

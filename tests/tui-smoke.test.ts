@@ -49,6 +49,16 @@ vi.mock("@opentui/solid/jsx-runtime", () => ({
     typeof type === "function" ? type(props) : { type, props },
 }));
 
+vi.mock("@opentui/solid/jsx-dev-runtime", () => ({
+  Fragment: Symbol.for("Fragment"),
+  jsx: (type: unknown, props: Record<string, unknown>) =>
+    typeof type === "function" ? type(props) : { type, props },
+  jsxs: (type: unknown, props: Record<string, unknown>) =>
+    typeof type === "function" ? type(props) : { type, props },
+  jsxDEV: (type: unknown, props: Record<string, unknown>) =>
+    typeof type === "function" ? type(props) : { type, props },
+}));
+
 function createElement(
   type: unknown,
   props: Record<string, unknown> | null,

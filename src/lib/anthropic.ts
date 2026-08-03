@@ -3,8 +3,7 @@
  *
  * Uses the local Claude CLI/runtime to detect install/auth state first. When
  * Claude auth is confirmed but local quota windows are missing, it falls back
- * to Claude OAuth credentials (macOS Keychain first, then the local credentials
- * file) and Anthropic's OAuth usage endpoint.
+ * to the local Claude credentials file and Anthropic's OAuth usage endpoint.
  */
 
 import { execFile } from "child_process";
@@ -23,7 +22,6 @@ const ANTHROPIC_OAUTH_BACKOFF_BASE_MS = 30_000;
 const ANTHROPIC_OAUTH_COOLDOWN_MAX_MS = 15 * 60_000;
 const ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const ANTHROPIC_BETA_HEADER = "oauth-2025-04-20";
-const CLAUDE_CODE_CREDENTIALS_SERVICE = "Claude Code-credentials";
 const CLAUDE_NO_LOCAL_QUOTA_MESSAGE =
   "Claude CLI auth detected, but local quota windows were not exposed.";
 const ANTHROPIC_NO_QUOTA_MESSAGE =
@@ -362,10 +360,6 @@ function getClaudeCredentialsPath(): string {
   return join(homedir(), ".claude", ".credentials.json");
 }
 
-function getClaudeKeychainLocation(): string {
-  return `macOS Keychain service ${sanitizeDisplayText(CLAUDE_CODE_CREDENTIALS_SERVICE)}`;
-}
-
 function getClaudeCredentialsNotFoundDetail(locations: string[]): string {
   if (locations.length === 0) {
     return "Claude OAuth credentials were not found.";
@@ -478,43 +472,6 @@ async function runCredentialCommand(file: string, args: string[]): Promise<Claud
   });
 }
 
-async function readClaudeCredentialsAccessTokenFromMacOSKeychain(): Promise<ClaudeCredentialSourceResult | null> {
-  if (process.platform !== "darwin") {
-    return null;
-  }
-
-  const location = getClaudeKeychainLocation();
-  const result = await runCredentialCommand("security", [
-    "find-generic-password",
-    "-s",
-    CLAUDE_CODE_CREDENTIALS_SERVICE,
-    "-w",
-  ]);
-
-  if (result.code !== 0) {
-    return {
-      state: "not-found",
-      location,
-    };
-  }
-
-  const parsed = parseClaudeCredentialsAccessToken(result.stdout, { allowPlainText: true });
-  if (parsed.accessToken) {
-    return {
-      state: "configured",
-      accessToken: parsed.accessToken,
-    };
-  }
-
-  return {
-    state: "unavailable",
-    detail:
-      parsed.error && parsed.error !== "missing"
-        ? `Could not parse Claude OAuth credentials from ${location}: ${parsed.error}.`
-        : `Claude OAuth access token missing in ${location}.`,
-  };
-}
-
 async function readClaudeCredentialsAccessTokenFromFile(): Promise<ClaudeCredentialSourceResult> {
   const credentialsPath = getClaudeCredentialsPath();
 
@@ -562,17 +519,6 @@ async function readClaudeCredentialsAccessTokenFromFile(): Promise<ClaudeCredent
 async function readClaudeCredentialsAccessToken(): Promise<ClaudeCredentialsAccess> {
   const locationsChecked: string[] = [];
   const unavailableDetails: string[] = [];
-
-  const keychainCredentials = await readClaudeCredentialsAccessTokenFromMacOSKeychain();
-  if (keychainCredentials?.state === "configured") {
-    return keychainCredentials;
-  }
-  if (keychainCredentials?.state === "unavailable") {
-    unavailableDetails.push(keychainCredentials.detail);
-  }
-  if (keychainCredentials?.state === "not-found") {
-    locationsChecked.push(keychainCredentials.location);
-  }
 
   const fileCredentials = await readClaudeCredentialsAccessTokenFromFile();
   if (fileCredentials.state === "configured") {
