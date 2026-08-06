@@ -1,24 +1,24 @@
 import { resolve } from "path";
-
-import type { QuotaRuntimeClient } from "./quota-runtime-context.js";
-import type { QuotaToastConfig } from "./types.js";
-
-import { formatQuotaRows } from "./format.js";
-import { getQuotaProviderShape } from "./provider-metadata.js";
+import { hasAnthropicCredentialsConfigured } from "./anthropic.js";
 import { findGitWorktreeRoot, getEffectiveConfigRoot } from "./config-file-utils.js";
+import { sanitizeQuotaRenderData } from "./display-sanitize.js";
+import { formatQuotaRows } from "./format.js";
+import { DEFAULT_KIMI_AUTH_CACHE_MAX_AGE_MS, resolveKimiAuthCached } from "./kimi-auth.js";
 import {
   loadConfiguredOpenCodeConfig,
   loadConfiguredProviderIds,
 } from "./opencode-config-providers.js";
+import { getQuotaProviderShape } from "./provider-metadata.js";
+import { buildQuotaExport, createExportProviderContext } from "./quota-export.js";
 import { resolveQuotaFormatStyle } from "./quota-format-style.js";
-import { getPackageVersion } from "./version.js";
 import { collectQuotaRenderData } from "./quota-render-data.js";
-import { sanitizeQuotaRenderData } from "./display-sanitize.js";
+import type { QuotaRuntimeClient } from "./quota-runtime-context.js";
 import {
   createQuotaRuntimeRequestContext,
   resolveQuotaRuntimeContext,
 } from "./quota-runtime-context.js";
-import { buildQuotaExport, createExportProviderContext } from "./quota-export.js";
+import type { QuotaToastConfig } from "./types.js";
+import { getPackageVersion } from "./version.js";
 
 export interface RunCliShowCommandOptions {
   argv?: string[];
@@ -38,8 +38,8 @@ const SHOW_USAGE = [
   "Options:",
   "  --provider <provider-id>  Show quota for one provider",
   "  --json                    Machine-readable JSON output (reads from cache)",
-  "  --threshold <pct>         With --json, exit 1 if any cached percentage is below <pct>%",
-  "                            remaining (exit 2 if no cached percentage can be compared)",
+  "  --threshold <pct>         With --json, exit 1 if any complete cached percentage is below",
+  "                            <pct>% remaining (exit 2 if data is incomplete or not comparable)",
   "  --help, -h                Show help",
 ].join("\n");
 
@@ -135,7 +135,11 @@ function cloneCliConfig(config: QuotaToastConfig): QuotaToastConfig {
   };
 }
 
-function resolveCliRoots(cwd: string): { workspaceRoot: string; configRoot: string; fallbackDirectory: string } {
+export function resolveCliRoots(cwd: string): {
+  workspaceRoot: string;
+  configRoot: string;
+  fallbackDirectory: string;
+} {
   const fallbackDirectory = resolve(cwd);
   const worktreeRoot = findGitWorktreeRoot(fallbackDirectory) ?? fallbackDirectory;
   const configRoot = getEffectiveConfigRoot(worktreeRoot);
@@ -146,7 +150,29 @@ function resolveCliRoots(cwd: string): { workspaceRoot: string; configRoot: stri
   };
 }
 
-function createCliQuotaClient(params: { configRootDir: string }): QuotaRuntimeClient {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+async function loadCliAuthenticatedProviderIds(config: Record<string, unknown>): Promise<string[]> {
+  const experimental = isRecord(config.experimental) ? config.experimental : undefined;
+  const quotaToast = isRecord(experimental?.quotaToast) ? experimental.quotaToast : undefined;
+  const anthropicBinaryPath =
+    typeof quotaToast?.anthropicBinaryPath === "string"
+      ? quotaToast.anthropicBinaryPath
+      : undefined;
+  const [anthropicConfigured, kimiAuth] = await Promise.all([
+    hasAnthropicCredentialsConfigured({ binaryPath: anthropicBinaryPath }),
+    resolveKimiAuthCached({ maxAgeMs: DEFAULT_KIMI_AUTH_CACHE_MAX_AGE_MS }),
+  ]);
+
+  return [
+    ...(anthropicConfigured ? ["anthropic"] : []),
+    ...(kimiAuth.state === "configured" ? ["kimi-for-coding"] : []),
+  ];
+}
+
+export function createCliQuotaClient(params: { configRootDir: string }): QuotaRuntimeClient {
   let configPromise: Promise<Record<string, unknown>> | undefined;
   let providerIdsPromise: Promise<string[]> | undefined;
 
@@ -164,9 +190,16 @@ function createCliQuotaClient(params: { configRootDir: string }): QuotaRuntimeCl
         };
       },
       providers: async () => {
-        providerIdsPromise ??= loadConfiguredProviderIds({
-          configRootDir: params.configRootDir,
-        });
+        providerIdsPromise ??= (async () => {
+          configPromise ??= loadConfiguredOpenCodeConfig({
+            configRootDir: params.configRootDir,
+          });
+          const [configuredIds, authenticatedIds] = await Promise.all([
+            loadConfiguredProviderIds({ configRootDir: params.configRootDir }),
+            configPromise.then(loadCliAuthenticatedProviderIds),
+          ]);
+          return [...new Set([...configuredIds, ...authenticatedIds])];
+        })();
         const ids = await providerIdsPromise;
         return {
           data: {
@@ -215,7 +248,12 @@ async function runCliShowJsonOutput(params: {
   writeLine(stdout, JSON.stringify(exportData, null, 2));
 
   if (threshold !== undefined) {
-    const okProviders = Object.values(exportData.providers).filter(
+    const providerResults = Object.values(exportData.providers);
+    if (providerResults.some((provider) => provider.status !== "ok")) {
+      return 2;
+    }
+
+    const okProviders = providerResults.filter(
       (p): p is Extract<typeof p, { status: "ok" }> => p.status === "ok",
     );
 
@@ -227,8 +265,8 @@ async function runCliShowJsonOutput(params: {
     let hasComparablePercent = false;
     for (const provider of okProviders) {
       const percents = provider.entries
-        .map((e) => e.percentRemaining)
-        .filter((p): p is number => p !== undefined);
+        .filter((entry) => entry.renderType === "percent")
+        .map((entry) => entry.percentRemaining);
       if (percents.length === 0) continue;
       hasComparablePercent = true;
       const minPercent = Math.min(...percents);
@@ -298,6 +336,7 @@ export async function runCliShowCommand(options: RunCliShowCommandOptions = {}):
 
     const result = await collectQuotaRenderData({
       client: runtime.client,
+      resolveRuntimeProviderIds: runtime.resolveRuntimeProviderIds,
       config,
       configMeta: runtime.configMeta,
       request: createQuotaRuntimeRequestContext(runtime),
@@ -307,7 +346,7 @@ export async function runCliShowCommand(options: RunCliShowCommandOptions = {}):
     });
 
     if (!result.data) {
-      writeLine(stderr, "No quota data available.");
+      writeLine(stderr, "No provider data available.");
       return 1;
     }
 
@@ -320,10 +359,11 @@ export async function runCliShowCommand(options: RunCliShowCommandOptions = {}):
       errors: data.errors,
       style: resolveQuotaFormatStyle(config.formatStyle),
       percentDisplayMode: config.percentDisplayMode,
+      resetTimeDecimals: config.resetTimeDecimals,
     });
 
     if (!output.trim()) {
-      writeLine(stderr, "No quota data available.");
+      writeLine(stderr, "No provider data available.");
       return 1;
     }
 

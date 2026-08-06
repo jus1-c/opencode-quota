@@ -1,8 +1,8 @@
-import { getAuthPaths, readAuthFile } from "./opencode-auth.js";
 import {
   createProviderApiKeyResolver,
   getGlobalOpencodeConfigCandidatePaths,
 } from "./api-key-resolver.js";
+import { getAuthPaths, readAuthFile } from "./opencode-auth.js";
 
 export interface SyntheticApiKeyResult {
   key: string;
@@ -29,6 +29,7 @@ const syntheticApiKeyResolver = createProviderApiKeyResolver<SyntheticKeySource>
   getConfigCandidates: getGlobalOpencodeConfigCandidatePaths,
   auth: {
     readAuth: readAuthFile,
+    getAuthPaths,
     authSource: "auth.json",
   },
 });
@@ -47,8 +48,5 @@ export async function getSyntheticKeyDiagnostics(): Promise<{
   checkedPaths: string[];
   authPaths: string[];
 }> {
-  return {
-    ...(await syntheticApiKeyResolver.diagnostics()),
-    authPaths: getAuthPaths(),
-  };
+  return syntheticApiKeyResolver.diagnostics();
 }

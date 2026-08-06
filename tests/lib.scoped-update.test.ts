@@ -5,10 +5,10 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  QUOTA_LATEST_SPEC,
   applyScopedUpdatePlan,
   isCanonicalQuotaUpdateSpec,
   planScopedUpdate,
+  QUOTA_LATEST_SPEC,
   runScopedUpdateCommand,
   sanitizeOpenCodePackageSpec,
 } from "../src/lib/scoped-update.js";
@@ -204,44 +204,44 @@ describe("scoped update application safety", () => {
     expect(readFileSync(manifest, "utf8")).toContain("@slkiser/opencode-quota");
   });
 
-  it.each(["read", "write"] as const)(
-    "reports earlier writes when a later config %s fails",
-    async (failureKind) => {
-      const f = fixture();
-      const first = join(f.project, "opencode.json");
-      const second = join(f.global, "tui.json");
-      write(first, `{"plugin":["@slkiser/opencode-quota@3.11.1"]}`);
-      write(second, `{"plugin":["@slkiser/opencode-quota@3.11.1"]}`);
-      const plan = await planScopedUpdate({
-        cwd: f.project,
-        env: f.env,
-        homeDir: join(f.root, "home"),
-      });
-      let reads = 0;
-      let writes = 0;
+  it.each([
+    "read",
+    "write",
+  ] as const)("reports earlier writes when a later config %s fails", async (failureKind) => {
+    const f = fixture();
+    const first = join(f.project, "opencode.json");
+    const second = join(f.global, "tui.json");
+    write(first, `{"plugin":["@slkiser/opencode-quota@3.11.1"]}`);
+    write(second, `{"plugin":["@slkiser/opencode-quota@3.11.1"]}`);
+    const plan = await planScopedUpdate({
+      cwd: f.project,
+      env: f.env,
+      homeDir: join(f.root, "home"),
+    });
+    let reads = 0;
+    let writes = 0;
 
-      const promise = applyScopedUpdatePlan(plan, {
-        readBytes: async (path) => {
-          reads++;
-          if (failureKind === "read" && reads === 2) throw new Error("read failed");
-          return readFileSync(path);
-        },
-        writeText: async (path, content) => {
-          writes++;
-          if (failureKind === "write" && writes === 2) throw new Error("write failed");
-          write(path, content);
-        },
-      });
+    const promise = applyScopedUpdatePlan(plan, {
+      readBytes: async (path) => {
+        reads++;
+        if (failureKind === "read" && reads === 2) throw new Error("read failed");
+        return readFileSync(path);
+      },
+      writeText: async (path, content) => {
+        writes++;
+        if (failureKind === "write" && writes === 2) throw new Error("write failed");
+        write(path, content);
+      },
+    });
 
-      const error = await promise.catch((caught: unknown) => caught);
-      expect(error).toMatchObject({
-        details: { writtenPaths: [first] },
-      });
-      expect(String(error)).toContain("Changed before failure");
-      expect(readFileSync(first, "utf8")).toContain("@latest");
-      expect(readFileSync(second, "utf8")).toContain("@3.11.1");
-    },
-  );
+    const error = await promise.catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      details: { writtenPaths: [first] },
+    });
+    expect(String(error)).toContain("Changed before failure");
+    expect(readFileSync(first, "utf8")).toContain("@latest");
+    expect(readFileSync(second, "utf8")).toContain("@3.11.1");
+  });
 
   it("detects raw-byte races before writing", async () => {
     const f = fixture();
@@ -304,17 +304,67 @@ describe("scoped update application safety", () => {
     expect(result.skippedCachePaths).toEqual(expect.arrayContaining([exact, latest]));
   });
 
-  it("dry-run and declined confirmation do not change config or cache", async () => {
+  it("reports dry-run and cancellation as no-write outcomes", async () => {
     const f = fixture();
     const config = join(f.project, "opencode.json");
     const original = `{"plugin":["@slkiser/opencode-quota@3.11.1"]}`;
     write(config, original);
-    const common = { cwd: f.project, env: f.env, homeDir: join(f.root, "home"), log: vi.fn() };
+    const log = vi.fn();
+    const common = { cwd: f.project, env: f.env, homeDir: join(f.root, "home"), log };
     expect(await runScopedUpdateCommand({ ...common, argv: ["--dry-run"] })).toBe(0);
+    expect(log).toHaveBeenCalledWith(
+      "OpenCode Quota update preview complete — no files changed. Run npx @slkiser/opencode-quota@latest update to apply.",
+    );
     expect(readFileSync(config, "utf8")).toBe(original);
+
+    log.mockClear();
     const confirm = vi.fn().mockResolvedValue(false);
     expect(await runScopedUpdateCommand({ ...common, confirm })).toBe(0);
     expect(confirm).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledWith("OpenCode Quota update cancelled — no files changed.");
     expect(readFileSync(config, "utf8")).toBe(original);
+  });
+
+  it("reports successful update paths, restart guidance, and the secondary star request", async () => {
+    const f = fixture();
+    const config = join(f.project, "opencode.json");
+    write(config, `{"plugin":["@slkiser/opencode-quota@3.11.1"]}`);
+    const log = vi.fn();
+
+    expect(
+      await runScopedUpdateCommand({
+        cwd: f.project,
+        env: f.env,
+        homeDir: join(f.root, "home"),
+        argv: ["--yes"],
+        log,
+      }),
+    ).toBe(0);
+
+    expect(log).toHaveBeenCalledWith("OpenCode Quota update complete.");
+    expect(log).toHaveBeenCalledWith(`Configured paths: ${config}`);
+    expect(log).toHaveBeenCalledWith("Restart OpenCode and run /quota.");
+    expect(log).toHaveBeenCalledWith(
+      "If OpenCode Quota helps, please consider a star: https://github.com/slkiser/opencode-quota",
+    );
+  });
+
+  it("reports update planning failures as no-write outcomes without asking for a star", async () => {
+    const f = fixture();
+    write(join(f.project, "opencode.jsonc"), "{ nope");
+    const log = vi.fn();
+
+    expect(
+      await runScopedUpdateCommand({
+        cwd: f.project,
+        env: f.env,
+        homeDir: join(f.root, "home"),
+        log,
+      }),
+    ).toBe(1);
+
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("OpenCode Quota update failed:"));
+    expect(log).toHaveBeenCalledWith("No files changed. Fix the reason above, then rerun update.");
+    expect(log.mock.calls.flat().join("\n")).not.toContain("star");
   });
 });

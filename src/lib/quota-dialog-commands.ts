@@ -1,4 +1,47 @@
+import {
+  formatYmd,
+  parseOptionalJsonArgs,
+  parseQuotaBetweenArgs,
+  startOfLocalDayMs,
+  startOfNextLocalDayMs,
+  type Ymd,
+} from "./command-parsing.js";
+import type { RuntimeContextRootHints } from "./config-file-utils.js";
+import { isCursorProviderId } from "./cursor-pricing.js";
+import { renderCommandHeading } from "./format-utils.js";
+import { refreshGoogleTokensForAllAccounts } from "./google.js";
+import {
+  BUNDLED_MAINTAINER_ANNOUNCEMENTS,
+  getMaintainerAnnouncementsSummary,
+} from "./maintainer-announcements.js";
+import {
+  getPricingSnapshotMeta,
+  getPricingSnapshotSource,
+  getRuntimePricingRefreshStatePath,
+  getRuntimePricingSnapshotPath,
+  maybeRefreshPricingSnapshot,
+  type PricingRefreshResult,
+  setPricingSnapshotAutoRefresh,
+  setPricingSnapshotSelection,
+} from "./modelsdev-pricing.js";
 import { formatQuotaCommand } from "./quota-command-format.js";
+import { ALL_WINDOWS_FORMAT_STYLE } from "./quota-format-style.js";
+import {
+  type CollectQuotaRenderDataResult,
+  collectConcreteEnabledProviderIds,
+  collectQuotaRenderData,
+  collectQuotaStatusLiveProbes,
+  matchesQuotaProviderCurrentSelection,
+  type QuotaStatusLiveProbe,
+  type SessionModelMeta,
+} from "./quota-render-data.js";
+import {
+  createQuotaProviderRuntimeContext,
+  createQuotaRuntimeRequestContext,
+  type QuotaRuntimeClient,
+  type QuotaRuntimeContext,
+  resolveQuotaRuntimeContext,
+} from "./quota-runtime-context.js";
 import {
   aggregateUsage,
   resolveSessionTree,
@@ -8,54 +51,8 @@ import {
 import { formatQuotaStatsReport } from "./quota-stats-format.js";
 import { buildQuotaStatusReport, type SessionTokenError } from "./quota-status.js";
 import { inspectTuiConfig } from "./tui-config-diagnostics.js";
-import {
-  getPricingSnapshotMeta,
-  getPricingSnapshotSource,
-  getRuntimePricingRefreshStatePath,
-  getRuntimePricingSnapshotPath,
-  maybeRefreshPricingSnapshot,
-  setPricingSnapshotAutoRefresh,
-  setPricingSnapshotSelection,
-  type PricingRefreshResult,
-} from "./modelsdev-pricing.js";
-import { refreshGoogleTokensForAllAccounts } from "./google.js";
-import { isCursorProviderId } from "./cursor-pricing.js";
-import {
-  parseOptionalJsonArgs,
-  parseQuotaBetweenArgs,
-  startOfLocalDayMs,
-  startOfNextLocalDayMs,
-  formatYmd,
-  type Ymd,
-} from "./command-parsing.js";
-import { renderCommandHeading } from "./format-utils.js";
 import type { PricingSnapshotSource } from "./types.js";
-import {
-  ALL_WINDOWS_FORMAT_STYLE,
-  SINGLE_WINDOW_PER_PROVIDER_FORMAT_STYLE,
-} from "./quota-format-style.js";
-import {
-  collectConcreteEnabledProviderIds,
-  collectQuotaRenderData,
-  collectQuotaStatusLiveProbes,
-  matchesQuotaProviderCurrentSelection,
-  resolveQuotaRenderSelection,
-  type QuotaRenderData as QuotaCommandRenderData,
-  type QuotaStatusLiveProbe,
-  type SessionModelMeta,
-} from "./quota-render-data.js";
-import {
-  createQuotaProviderRuntimeContext,
-  createQuotaRuntimeRequestContext,
-  resolveQuotaRuntimeContext,
-  type QuotaRuntimeClient,
-  type QuotaRuntimeContext,
-} from "./quota-runtime-context.js";
-import type { RuntimeContextRootHints } from "./config-file-utils.js";
-import {
-  BUNDLED_MAINTAINER_ANNOUNCEMENTS,
-  getMaintainerAnnouncementsSummary,
-} from "./maintainer-announcements.js";
+import { getPackageVersion } from "./version.js";
 
 export type QuotaDialogCommandId =
   | "quota"
@@ -242,15 +239,17 @@ export const QUOTA_DIALOG_COMMANDS: readonly QuotaDialogCommandSpec[] = [
     dialogSize: "xlarge",
     acceptsArguments: true,
   },
-  ...TOKEN_REPORT_COMMANDS.map((spec): QuotaDialogCommandSpec => ({
-    id: spec.id,
-    slashName: spec.id,
-    title: spec.kind === "between" ? "OpenCode Quota Token Report" : spec.metadataTitle,
-    description: spec.description,
-    dialogSize: "xlarge",
-    requiresSession: spec.kind === "session" || spec.kind === "session_tree",
-    acceptsArguments: spec.kind === "between",
-  })),
+  ...TOKEN_REPORT_COMMANDS.map(
+    (spec): QuotaDialogCommandSpec => ({
+      id: spec.id,
+      slashName: spec.id,
+      title: spec.kind === "between" ? "OpenCode Quota Token Report" : spec.metadataTitle,
+      description: spec.description,
+      dialogSize: "xlarge",
+      requiresSession: spec.kind === "session" || spec.kind === "session_tree",
+      acceptsArguments: spec.kind === "between",
+    }),
+  ),
 ] as const;
 
 const QUOTA_DIALOG_COMMANDS_BY_ID: ReadonlyMap<QuotaDialogCommandId, QuotaDialogCommandSpec> =
@@ -283,13 +282,8 @@ function describeQuotaCommandCurrentSelection(params: {
   return "current session";
 }
 
-async function buildQuotaCommandUnavailableMessage(runtime: QuotaRuntimeContext): Promise<string> {
-  const selection = await resolveQuotaRenderSelection({
-    client: runtime.client,
-    config: runtime.config,
-    request: createQuotaRuntimeRequestContext(runtime),
-    providers: runtime.providers,
-  });
+function buildQuotaCommandUnavailableMessage(result: CollectQuotaRenderDataResult): string {
+  const selection = result.selection;
   if (!selection) {
     return "Quota unavailable\n\nNo enabled quota providers are configured.\n\nRun /quota_status for diagnostics.";
   }
@@ -302,16 +296,9 @@ async function buildQuotaCommandUnavailableMessage(runtime: QuotaRuntimeContext)
     return `Quota unavailable\n\nNo enabled quota providers matched the ${detail}.\n\nRun /quota_status for diagnostics.`;
   }
 
-  const avail = await Promise.all(
-    selection.filtered.map(async (p) => {
-      try {
-        return { id: p.id, ok: await p.isAvailable(selection.ctx) };
-      } catch {
-        return { id: p.id, ok: false };
-      }
-    }),
-  );
-  const availableIds = avail.filter((x) => x.ok).map((x) => x.id);
+  const availableIds = result.availability
+    .filter((item) => item.ok)
+    .map((item) => item.provider.id);
 
   if (availableIds.length === 0) {
     const scopedDetail = selection.filteringByCurrentSelection
@@ -321,14 +308,14 @@ async function buildQuotaCommandUnavailableMessage(runtime: QuotaRuntimeContext)
         })}`
       : "";
     return (
-      `Quota unavailable\n\nNo quota providers detected${scopedDetail}. ` +
+      `Quota unavailable\n\nNo provider data available${scopedDetail}. ` +
       "Make sure you are logged in to a supported provider (Copilot, OpenAI, etc.).\n\n" +
       "Run /quota_status for diagnostics."
     );
   }
 
   return (
-    `Quota unavailable\n\nProviders detected (${availableIds.join(", ")}) but returned no data. ` +
+    `Quota unavailable\n\nNo provider data available for detected providers (${availableIds.join(", ")}). ` +
     "This may be a temporary API error.\n\n" +
     "Run /quota_status for diagnostics."
   );
@@ -337,11 +324,12 @@ async function buildQuotaCommandUnavailableMessage(runtime: QuotaRuntimeContext)
 async function fetchQuotaCommandData(params: {
   runtime: QuotaRuntimeContext;
   setLastSessionTokenError?: (error: SessionTokenError | undefined) => void;
-}): Promise<QuotaCommandRenderData | null> {
+}): Promise<CollectQuotaRenderDataResult> {
   const { runtime } = params;
   const request = createQuotaRuntimeRequestContext(runtime);
   const quotaResult = await collectQuotaRenderData({
     client: runtime.client,
+    resolveRuntimeProviderIds: runtime.resolveRuntimeProviderIds,
     config: runtime.config,
     configMeta: runtime.configMeta,
     request,
@@ -354,14 +342,7 @@ async function fetchQuotaCommandData(params: {
     params.setLastSessionTokenError?.(quotaResult.sessionTokenError);
   }
 
-  if (
-    quotaResult.selection?.filteringByCurrentSelection &&
-    quotaResult.selection.filtered.length === 0
-  ) {
-    return null;
-  }
-
-  return quotaResult.data;
+  return quotaResult;
 }
 
 async function kickPricingRefresh(params: {
@@ -435,7 +416,58 @@ async function buildQuotaReport(params: {
   });
 }
 
-async function buildStatusReport(params: {
+export interface QuotaStatusReportConfigPayload {
+  configSource: string;
+  configPaths: string[];
+  globalConfigPaths?: string[];
+  workspaceConfigPaths?: string[];
+  enabledProviders: string[] | "auto";
+  onlyCurrentModel: boolean;
+  pricingSnapshotSource: PricingSnapshotSource;
+}
+
+export interface QuotaStatusReportPricingPayload {
+  selection: PricingSnapshotSource;
+  activeSource: string;
+  snapshot: {
+    source: string;
+    generatedAt: string | null;
+    units: string;
+  };
+  snapshotPath: string;
+  refreshStatePath: string;
+}
+
+export interface QuotaStatusReportPayload {
+  version: string;
+  generatedAt: string;
+  config: QuotaStatusReportConfigPayload;
+  providers: Array<{
+    id: string;
+    enabled: boolean;
+    available: boolean;
+    matchesCurrentModel?: boolean;
+  }>;
+  pricing: QuotaStatusReportPricingPayload;
+  liveProbes: Array<{ id: string; ok: boolean }>;
+}
+
+export interface QuotaStatusReportData {
+  output: string | null;
+  payload: QuotaStatusReportPayload | null;
+  hasComparableProviderData: boolean;
+}
+
+export function summarizeQuotaStatusLiveProbes(
+  probes: QuotaStatusLiveProbe[],
+): QuotaStatusReportPayload["liveProbes"] {
+  return probes.map((probe) => ({
+    id: probe.providerId,
+    ok: probe.result.attempted && probe.result.errors.length === 0,
+  }));
+}
+
+export async function buildStatusReportData(params: {
   runtime: QuotaRuntimeContext;
   refreshGoogleTokens?: boolean;
   skewMs?: number;
@@ -444,9 +476,14 @@ async function buildStatusReport(params: {
   generatedAtMs: number;
   lastSessionTokenError?: SessionTokenError;
   log?: (message: string, extra?: Record<string, unknown>) => Promise<void>;
-}): Promise<string | null> {
+  onDetectedProviderIds?: (providerIds: string[]) => Promise<void>;
+  /** When set, restrict provider availability and live probes to this provider id. */
+  providerFilterId?: string;
+}): Promise<QuotaStatusReportData> {
   const runtimeConfig = params.runtime.config;
-  if (!runtimeConfig.enabled) return null;
+  if (!runtimeConfig.enabled) {
+    return { output: null, payload: null, hasComparableProviderData: false };
+  }
   await kickPricingRefresh({
     reason: "status",
     maxWaitMs: 750,
@@ -465,7 +502,9 @@ async function buildStatusReport(params: {
 
   const isAutoMode = runtimeConfig.enabledProviders === "auto";
 
-  const providers = params.runtime.providers;
+  const providers = params.providerFilterId
+    ? params.runtime.providers.filter((provider) => provider.id === params.providerFilterId)
+    : params.runtime.providers;
   const providerContext = createQuotaProviderRuntimeContext(params.runtime);
   const availability = await Promise.all(
     providers.map(async (p) => {
@@ -485,30 +524,33 @@ async function buildStatusReport(params: {
                 provider: p,
                 currentModel,
                 currentProviderID,
+                enabledProviders: runtimeConfig.enabledProviders,
+                quotaProviders: runtimeConfig.quotaProviders,
               })
             : undefined,
       };
     }),
   );
 
-  const providersById = new Map(providers.map((provider) => [provider.id, provider] as const));
-  const liveProbeProviders = availability.flatMap((item) => {
-    if (!item.enabled || !item.available) {
-      return [];
-    }
-    const provider = providersById.get(item.id);
-    return provider ? [provider] : [];
-  });
+  if (isAutoMode) {
+    await params.onDetectedProviderIds?.(
+      availability.filter((item) => item.available).map((item) => item.id),
+    );
+  }
+
+  // Status diagnostics belong to provider results, including missing or disabled
+  // providers. Provider fetch implementations must keep unconfigured cases local.
+  const liveProbeProviders = providers;
 
   let providerLiveProbes: QuotaStatusLiveProbe[] = [];
   if (liveProbeProviders.length > 0) {
     try {
       providerLiveProbes = await collectQuotaStatusLiveProbes({
         client: params.runtime.client,
+        resolveRuntimeProviderIds: params.runtime.resolveRuntimeProviderIds,
         config: runtimeConfig,
         configMeta: params.runtime.configMeta,
         request: createQuotaRuntimeRequestContext(params.runtime),
-        formatStyle: SINGLE_WINDOW_PER_PROVIDER_FORMAT_STYLE,
         providers: liveProbeProviders,
       });
     } catch (error) {
@@ -531,7 +573,7 @@ async function buildStatusReport(params: {
     enabledProviders: announcementProviderIds,
   });
 
-  return await buildQuotaStatusReport({
+  const output = await buildQuotaStatusReport({
     tuiDiagnostics,
     configSource: params.runtime.configMeta.source,
     configPaths: params.runtime.configMeta.paths,
@@ -540,8 +582,8 @@ async function buildStatusReport(params: {
     settingSources: params.runtime.configMeta.settingSources,
     configIssues: params.runtime.configMeta.configIssues,
     enabledProviders: runtimeConfig.enabledProviders,
+    googleModels: runtimeConfig.googleModels,
     anthropicBinaryPath: runtimeConfig.anthropicBinaryPath,
-    alibabaCodingPlanTier: runtimeConfig.alibabaCodingPlanTier,
     cursorPlan: runtimeConfig.cursorPlan,
     cursorIncludedApiUsd: runtimeConfig.cursorIncludedApiUsd,
     cursorBillingCycleStartDay: runtimeConfig.cursorBillingCycleStartDay,
@@ -552,6 +594,7 @@ async function buildStatusReport(params: {
     sessionModelLookup,
     providerAvailability: availability,
     providerLiveProbes,
+    quotaProviders: runtimeConfig.quotaProviders,
     googleRefresh: refresh
       ? {
           attempted: true,
@@ -565,9 +608,59 @@ async function buildStatusReport(params: {
       config: runtimeConfig.maintainerAnnouncements,
       summary: maintainerAnnouncementsSummary,
     },
-    geminiCliClient: params.runtime.client,
     generatedAtMs: params.generatedAtMs,
   });
+
+  const version = (await getPackageVersion()) ?? "unknown";
+  const pricingMeta = getPricingSnapshotMeta();
+  const activePricingSource = getPricingSnapshotSource();
+  const payload: QuotaStatusReportPayload = {
+    version,
+    generatedAt: new Date(params.generatedAtMs).toISOString(),
+    config: {
+      configSource: params.runtime.configMeta.source,
+      configPaths: params.runtime.configMeta.paths,
+      globalConfigPaths: params.runtime.configMeta.globalConfigPaths,
+      workspaceConfigPaths: params.runtime.configMeta.workspaceConfigPaths,
+      enabledProviders: runtimeConfig.enabledProviders,
+      onlyCurrentModel: runtimeConfig.onlyCurrentModel,
+      pricingSnapshotSource: runtimeConfig.pricingSnapshot.source,
+    },
+    providers: availability,
+    pricing: {
+      selection: runtimeConfig.pricingSnapshot.source,
+      activeSource: activePricingSource,
+      snapshot: {
+        source: pricingMeta.source,
+        generatedAt:
+          pricingMeta.generatedAt > 0 ? new Date(pricingMeta.generatedAt).toISOString() : null,
+        units: pricingMeta.units,
+      },
+      snapshotPath: getRuntimePricingSnapshotPath(),
+      refreshStatePath: getRuntimePricingRefreshStatePath(),
+    },
+    liveProbes: summarizeQuotaStatusLiveProbes(providerLiveProbes),
+  };
+
+  return {
+    output,
+    payload,
+    hasComparableProviderData: providerLiveProbes.some((probe) => probe.result.entries.length > 0),
+  };
+}
+
+async function buildStatusReport(params: {
+  runtime: QuotaRuntimeContext;
+  refreshGoogleTokens?: boolean;
+  skewMs?: number;
+  force?: boolean;
+  sessionID?: string;
+  generatedAtMs: number;
+  lastSessionTokenError?: SessionTokenError;
+  log?: (message: string, extra?: Record<string, unknown>) => Promise<void>;
+  onDetectedProviderIds?: (providerIds: string[]) => Promise<void>;
+}): Promise<string | null> {
+  return (await buildStatusReportData(params)).output;
 }
 
 function formatIsoTimestamp(timestampMs: number | undefined): string {
@@ -810,6 +903,7 @@ export async function buildQuotaDialogCommandOutput(params: {
   lastSessionTokenError?: SessionTokenError;
   setLastSessionTokenError?: (error: SessionTokenError | undefined) => void;
   log?: (message: string, extra?: Record<string, unknown>) => Promise<void>;
+  onDetectedProviderIds?: (providerIds: string[]) => Promise<void>;
 }): Promise<QuotaDialogCommandOutputResult> {
   const generatedAtMs = params.generatedAtMs ?? Date.now();
   const runtime = await resolveQuotaRuntimeContext({
@@ -833,17 +927,21 @@ export async function buildQuotaDialogCommandOutput(params: {
       runtime,
       setLastSessionTokenError: params.setLastSessionTokenError,
     });
-    if (!reportData) {
+    if (
+      !reportData.data ||
+      (reportData.selection?.filteringByCurrentSelection &&
+        reportData.selection.filtered.length === 0)
+    ) {
       return outputResult({
         command: params.command,
-        output: await buildQuotaCommandUnavailableMessage(runtime),
+        output: buildQuotaCommandUnavailableMessage(reportData),
       });
     }
 
     return outputResult({
       command: params.command,
       output: formatQuotaCommand({
-        ...reportData,
+        ...reportData.data,
         generatedAtMs,
         percentDisplayMode: runtime.config.percentDisplayMode,
       }),
@@ -869,8 +967,11 @@ export async function buildQuotaDialogCommandOutput(params: {
       generatedAtMs,
       lastSessionTokenError: params.lastSessionTokenError,
       log: params.log,
+      onDetectedProviderIds: params.onDetectedProviderIds,
     });
-    return output ? outputResult({ command: params.command, output }) : { state: "noop", command: params.command, reason: "disabled" };
+    return output
+      ? outputResult({ command: params.command, output })
+      : { state: "noop", command: params.command, reason: "disabled" };
   }
 
   if (params.command === "quota_announcements") {

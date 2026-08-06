@@ -1,19 +1,27 @@
 /** @jsxImportSource @opentui/solid */
-import type { JSX } from "@opentui/solid";
+
 import type {
   TuiPlugin,
   TuiPluginApi,
   TuiPluginModule,
   TuiPromptRef,
 } from "@opencode-ai/plugin/tui";
-import { Show, createEffect, createSignal, onCleanup } from "solid-js";
-
+import type { JSX } from "@opentui/solid";
+import { createEffect, createSignal, onCleanup, Show } from "solid-js";
+import {
+  buildQuotaDialogCommandOutput,
+  QUOTA_DIALOG_COMMANDS,
+  type QuotaDialogCommandId,
+  type QuotaDialogCommandSpec,
+} from "./lib/quota-dialog-commands.js";
+import type { SessionTokenError } from "./lib/quota-status.js";
+import { disposeQuotaTelemetryOwner } from "./lib/quota-telemetry.js";
+import { getSidebarBodyLineColor } from "./lib/tui-line-style.js";
 import type {
   CompactStatusState,
   HomeBottomState,
   SidebarPanelState,
 } from "./lib/tui-panel-state.js";
-
 import {
   getCompactStatusText,
   getHomeBottomAnnouncementText,
@@ -23,13 +31,18 @@ import {
   shouldRenderHomeBottom,
   shouldRenderSidebarPanel,
 } from "./lib/tui-panel-state.js";
-import { getSidebarBodyLineColor } from "./lib/tui-line-style.js";
+import { createTuiRefreshLifecycle } from "./lib/tui-refresh-lifecycle.js";
 import {
+  createTuiQuotaClient,
+  getTuiRuntimeRootHints,
+  getTuiSessionModelMeta,
   loadTuiHomeBottomStatus,
   loadTuiSessionQuotaSurfaces,
+  normalizeTuiSessionID,
   resolveTuiSurfaceRegistration,
   writeTuiQuotaExportIfEnabled,
 } from "./lib/tui-runtime.js";
+import type { TuiCommandDisplay } from "./lib/types.js";
 
 const id = "@slkiser/opencode-quota";
 // Place Quota near the top so variable-height built-in sections
@@ -41,6 +54,11 @@ const EVENT_REFRESH_DELAYS_MS = [150, 600] as const;
 const MOUNT_RECOVERY_DELAYS_MS = [500, 1_500, 4_000] as const;
 
 type TuiPromptRefCallback = (ref: TuiPromptRef | undefined) => void;
+type DialogSize = "medium" | "large" | "xlarge";
+
+type QuotaDialogCommandState = {
+  lastSessionTokenError?: SessionTokenError;
+};
 type SessionQuotaResource = {
   sessionID: string;
   sidebar: () => SidebarPanelState;
@@ -74,115 +92,54 @@ function createSessionQuotaResource(api: TuiPluginApi, sessionID: string): Sessi
   });
   const [compact, setCompact] = createSignal<CompactStatusState>({ status: "loading" });
 
-  let refCount = 0;
-  let disposed = false;
-  let loadVersion = 0;
-  let inFlight = false;
-  let queued = false;
-  const timers = new Set<ReturnType<typeof setTimeout>>();
-
-  const reload = () => {
-    if (disposed) return;
-
-    if (inFlight) {
-      queued = true;
-      loadVersion += 1;
-      return;
-    }
-
-    inFlight = true;
-    const currentVersion = ++loadVersion;
-
-    void loadTuiSessionQuotaSurfaces({ api, sessionID })
-      .then((next) => {
-        if (disposed || currentVersion !== loadVersion) return;
-        setSidebar(next.sidebar);
-        setCompact(next.compact);
-      })
-      .catch(() => {
-        if (disposed || currentVersion !== loadVersion) return;
-      })
-      .finally(() => {
-        if (disposed) return;
-        inFlight = false;
-        if (queued) {
-          queued = false;
-          reload();
+  const lifecycle = createTuiRefreshLifecycle({
+    load: () => loadTuiSessionQuotaSurfaces({ api, sessionID }),
+    apply: (next) => {
+      setSidebar(next.sidebar);
+      setCompact(next.compact);
+    },
+    intervalMs: REFRESH_INTERVAL_MS,
+    eventRefreshDelaysMs: EVENT_REFRESH_DELAYS_MS,
+    // TUI/session state can hydrate asynchronously after mount or session switch,
+    // so retry a few times to recover from empty first-load reads.
+    recoveryDelaysMs: MOUNT_RECOVERY_DELAYS_MS,
+    subscribe: (scheduleRefresh) => [
+      api.event.on("session.updated", (event) => {
+        if (event.properties?.info?.id === sessionID) {
+          scheduleRefresh();
         }
-      });
-  };
-
-  const queueRefresh = (delay: number) => {
-    if (disposed) return;
-
-    const timer = setTimeout(() => {
-      timers.delete(timer);
-      reload();
-    }, delay);
-    timers.add(timer);
-  };
-
-  const scheduleRefresh = () => {
-    for (const delay of EVENT_REFRESH_DELAYS_MS) queueRefresh(delay);
-  };
-
-  // TUI/session state can hydrate asynchronously after mount or session switch,
-  // so retry a few times to recover from empty first-load reads.
-  const scheduleMountRecovery = () => {
-    for (const delay of MOUNT_RECOVERY_DELAYS_MS) queueRefresh(delay);
-  };
-
-  const interval = setInterval(reload, REFRESH_INTERVAL_MS);
-  const unsubscribers = [
-    api.event.on("session.updated", (event) => {
-      if (event.properties?.info?.id === sessionID) {
-        scheduleRefresh();
-      }
-    }),
-    api.event.on("message.updated", (event) => {
-      if (event.properties?.info?.sessionID === sessionID) {
-        scheduleRefresh();
-      }
-    }),
-    api.event.on("message.removed", (event) => {
-      if (event.properties?.sessionID === sessionID) {
-        scheduleRefresh();
-      }
-    }),
-    api.event.on("tui.session.select", (event) => {
-      if (event.properties?.sessionID === sessionID) {
-        scheduleRefresh();
-      }
-    }),
-  ];
-
-  const dispose = () => {
-    if (disposed) return;
-
-    disposed = true;
-    clearInterval(interval);
-    for (const timer of timers) clearTimeout(timer);
-    timers.clear();
-    for (const unsubscribe of unsubscribers) unsubscribe();
-    getSessionResourceMap(api).delete(sessionID);
-  };
+      }),
+      api.event.on("message.updated", (event) => {
+        if (event.properties?.info?.sessionID === sessionID) {
+          scheduleRefresh();
+        }
+      }),
+      api.event.on("message.removed", (event) => {
+        if (event.properties?.sessionID === sessionID) {
+          scheduleRefresh();
+        }
+      }),
+      api.event.on("tui.session.select", (event) => {
+        if (event.properties?.sessionID === sessionID) {
+          scheduleRefresh();
+        }
+      }),
+    ],
+    onDispose: () => {
+      getSessionResourceMap(api).delete(sessionID);
+    },
+  });
 
   const resource: SessionQuotaResource = {
     sessionID,
     sidebar,
     compact,
     retain: () => {
-      refCount += 1;
+      lifecycle.retain();
       return resource;
     },
-    release: () => {
-      refCount -= 1;
-      if (refCount <= 0) dispose();
-    },
+    release: lifecycle.release,
   };
-
-  reload();
-  scheduleMountRecovery();
 
   return resource;
 }
@@ -197,109 +154,58 @@ function acquireSessionQuotaResource(api: TuiPluginApi, sessionID: string): Sess
   return next;
 }
 
-function createHomeBottomResource(api: TuiPluginApi): HomeBottomResource {
+function createHomeBottomResource(
+  api: TuiPluginApi,
+  compactHomeBottomEnabled: boolean,
+): HomeBottomResource {
   const [bottom, setBottom] = createSignal<HomeBottomState>({
     status: "loading",
-    compact: { status: "loading" },
+    compact: compactHomeBottomEnabled ? { status: "loading" } : { status: "disabled" },
   });
 
-  let refCount = 0;
-  let disposed = false;
-  let loadVersion = 0;
-  let inFlight = false;
-  let queued = false;
-  const timers = new Set<ReturnType<typeof setTimeout>>();
-
-  const reload = () => {
-    if (disposed) return;
-
-    if (inFlight) {
-      queued = true;
-      loadVersion += 1;
-      return;
-    }
-
-    inFlight = true;
-    const currentVersion = ++loadVersion;
-
-    void loadTuiHomeBottomStatus({ api })
-      .then((next) => {
-        if (disposed || currentVersion !== loadVersion) return;
-        setBottom(next);
-        // Fire-and-forget: write export file if enabled. A failed write must
-        // never affect TUI rendering, so log a warning and continue.
-        void writeTuiQuotaExportIfEnabled({ api }).catch((err) => {
-          console.warn(`[opencode-quota] quota export write failed: ${String(err)}`);
-        });
-      })
-      .catch(() => {
-        if (disposed || currentVersion !== loadVersion) return;
-      })
-      .finally(() => {
-        if (disposed) return;
-        inFlight = false;
-        if (queued) {
-          queued = false;
-          reload();
-        }
+  const lifecycle = createTuiRefreshLifecycle({
+    load: () => loadTuiHomeBottomStatus({ api }),
+    apply: setBottom,
+    afterApply: () => {
+      // Fire-and-forget: write export file if enabled. A failed write must
+      // never affect TUI rendering, so log a warning and continue.
+      void writeTuiQuotaExportIfEnabled({ api }).catch((err) => {
+        console.warn(`[opencode-quota] quota export write failed: ${String(err)}`);
       });
-  };
-
-  const queueRefresh = (delay: number) => {
-    if (disposed) return;
-
-    const timer = setTimeout(() => {
-      timers.delete(timer);
-      reload();
-    }, delay);
-    timers.add(timer);
-  };
-
-  const scheduleRefresh = () => {
-    for (const delay of EVENT_REFRESH_DELAYS_MS) queueRefresh(delay);
-  };
-
-  const interval = setInterval(reload, REFRESH_INTERVAL_MS);
-  const unsubscribers = [
-    api.event.on("session.updated", scheduleRefresh),
-    api.event.on("message.updated", scheduleRefresh),
-    api.event.on("message.removed", scheduleRefresh),
-    api.event.on("tui.session.select", scheduleRefresh),
-  ];
-
-  const dispose = () => {
-    if (disposed) return;
-
-    disposed = true;
-    clearInterval(interval);
-    for (const timer of timers) clearTimeout(timer);
-    timers.clear();
-    for (const unsubscribe of unsubscribers) unsubscribe();
-    homeResources.delete(api);
-  };
+    },
+    intervalMs: REFRESH_INTERVAL_MS,
+    eventRefreshDelaysMs: EVENT_REFRESH_DELAYS_MS,
+    subscribe: (scheduleRefresh) => [
+      api.event.on("session.updated", scheduleRefresh),
+      api.event.on("message.updated", scheduleRefresh),
+      api.event.on("message.removed", scheduleRefresh),
+      api.event.on("tui.session.select", scheduleRefresh),
+    ],
+    onDispose: () => {
+      homeResources.delete(api);
+    },
+  });
 
   const resource: HomeBottomResource = {
     bottom,
     retain: () => {
-      refCount += 1;
+      lifecycle.retain();
       return resource;
     },
-    release: () => {
-      refCount -= 1;
-      if (refCount <= 0) dispose();
-    },
+    release: lifecycle.release,
   };
-
-  reload();
 
   return resource;
 }
 
-function acquireHomeBottomResource(api: TuiPluginApi): HomeBottomResource {
+function acquireHomeBottomResource(
+  api: TuiPluginApi,
+  compactHomeBottomEnabled: boolean,
+): HomeBottomResource {
   const existing = homeResources.get(api);
   if (existing) return existing.retain();
 
-  const next = createHomeBottomResource(api).retain();
+  const next = createHomeBottomResource(api, compactHomeBottomEnabled).retain();
   homeResources.set(api, next);
   return next;
 }
@@ -435,28 +341,249 @@ function SessionPromptWithCompactStatus(props: {
   );
 }
 
-function HomeBottomView(props: { api: TuiPluginApi }) {
-  const resource = acquireHomeBottomResource(props.api);
+function HomeBottomView(props: { api: TuiPluginApi; compactHomeBottomEnabled: boolean }) {
+  const resource = acquireHomeBottomResource(props.api, props.compactHomeBottomEnabled);
   onCleanup(() => resource.release());
 
   const announcement = () => getHomeBottomAnnouncementText(resource.bottom());
   const compact = () => resource.bottom().compact;
+  const visible = () => shouldRenderHomeBottom(resource.bottom());
 
   return (
-    <Show when={shouldRenderHomeBottom(resource.bottom())}>
-      <box gap={0}>
+    <box gap={0}>
+      <Show when={visible()}>
         <text> </text>
-        <Show when={announcement()}>
-          <box flexDirection="row" justifyContent="center">
-            <text fg={props.api.theme.current.textMuted} wrapMode="none">
-              {announcement()}
-            </text>
-          </box>
-        </Show>
+      </Show>
+      <Show when={visible() && announcement()}>
+        <box flexDirection="row" justifyContent="center">
+          <text fg={props.api.theme.current.textMuted} wrapMode="none">
+            {announcement()}
+          </text>
+        </box>
+      </Show>
+      <Show when={visible()}>
         <CompactStatusLine api={props.api} panel={compact} justifyContent="center" />
-      </box>
-    </Show>
+      </Show>
+    </box>
   );
+}
+
+function getActiveTuiSessionID(api: TuiPluginApi): string | undefined {
+  if (api.route.current.name !== "session") return undefined;
+  return normalizeTuiSessionID(api.route.current.params?.sessionID);
+}
+
+function getTuiCommandArguments(input: unknown): string | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const record = input as Record<string, unknown>;
+  for (const key of ["arguments", "args", "query"] as const) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function CommandLoadingDialog(props: { api: TuiPluginApi; title: string }) {
+  return (
+    <box gap={1} paddingLeft={2} paddingRight={2} paddingBottom={1}>
+      <text fg={props.api.theme.current.text}>
+        <b>{props.title}</b>
+      </text>
+      <text fg={props.api.theme.current.textMuted}>Loading deterministic local output…</text>
+    </box>
+  );
+}
+
+function CommandOutputDialog(props: { api: TuiPluginApi; title: string; output: string }) {
+  const lines = () => props.output.split("\n");
+  const bodyHeight = () => Math.min(28, Math.max(6, lines().length));
+  return (
+    <box gap={1} width="100%" flexGrow={1} paddingLeft={2} paddingRight={2} paddingBottom={1}>
+      <text fg={props.api.theme.current.text}>
+        <b>{props.title}</b>
+      </text>
+      <scrollbox width="100%" flexGrow={1} minHeight={bodyHeight()} maxHeight={28}>
+        <box gap={0} width="100%" minWidth={0}>
+          {lines().map((line) => (
+            <text fg={props.api.theme.current.text} wrapMode="word" width="100%">
+              {line || " "}
+            </text>
+          ))}
+        </box>
+      </scrollbox>
+      <text fg={props.api.theme.current.textMuted}>esc closes</text>
+    </box>
+  );
+}
+
+function CommandErrorDialog(props: { api: TuiPluginApi; title: string; error: unknown }) {
+  const message = props.error instanceof Error ? props.error.message : String(props.error);
+  return (
+    <box gap={1} paddingLeft={2} paddingRight={2} paddingBottom={1}>
+      <text fg={props.api.theme.current.text}>
+        <b>{props.title}</b>
+      </text>
+      <text fg={props.api.theme.current.text}>OpenCode Quota command failed.</text>
+      <text fg={props.api.theme.current.textMuted} wrapMode="none">
+        {message || "Unknown error"}
+      </text>
+      <text fg={props.api.theme.current.textMuted}>esc closes</text>
+    </box>
+  );
+}
+
+function getCommandPromptCopy(spec: QuotaDialogCommandSpec): {
+  title: string;
+  placeholder: string;
+  description: string;
+} {
+  switch (spec.id) {
+    case "tokens_between":
+      return {
+        title: "OpenCode Quota Token Range",
+        placeholder: "YYYY-MM-DD YYYY-MM-DD",
+        description: "Enter start and end dates, for example: 2026-01-01 2026-01-15",
+      };
+    case "quota_status":
+      return {
+        title: "OpenCode Quota Status Options",
+        placeholder: 'Optional JSON, e.g. {"refreshGoogleTokens":true}',
+        description: "Leave blank for normal diagnostics, or enter one JSON options object.",
+      };
+    default:
+      return {
+        title: spec.title,
+        placeholder: "Optional arguments",
+        description: "Leave blank to run with no arguments.",
+      };
+  }
+}
+
+function replaceDialog(api: TuiPluginApi, size: DialogSize, render: () => JSX.Element): void {
+  api.ui.dialog.replace(render);
+  // OpenCode dialog.replace() resets size to medium.
+  api.ui.dialog.setSize(size);
+}
+
+async function runQuotaDialogCommandAsync(
+  api: TuiPluginApi,
+  command: QuotaDialogCommandId,
+  commandDisplay: TuiCommandDisplay,
+  rawInput?: unknown,
+  state?: QuotaDialogCommandState,
+): Promise<void> {
+  const spec = QUOTA_DIALOG_COMMANDS.find((item) => item.id === command)!;
+  const argumentsText = getTuiCommandArguments(rawInput);
+  const sessionID = getActiveTuiSessionID(api);
+
+  if (spec.acceptsArguments && rawInput === undefined) {
+    const prompt = getCommandPromptCopy(spec);
+    replaceDialog(api, "medium", () => (
+      <api.ui.DialogPrompt
+        title={prompt.title}
+        placeholder={prompt.placeholder}
+        description={() => (
+          <text fg={api.theme.current.textMuted} wrapMode="word">
+            {prompt.description}
+          </text>
+        )}
+        onCancel={() => api.ui.dialog.clear()}
+        onConfirm={(value) => {
+          void runQuotaDialogCommandAsync(
+            api,
+            command,
+            commandDisplay,
+            { arguments: value.trim() },
+            state,
+          );
+        }}
+      />
+    ));
+    return;
+  }
+
+  const destination =
+    commandDisplay === "inline" && sessionID
+      ? { type: "inline" as const, sessionID }
+      : { type: "dialog" as const };
+  if (destination.type === "dialog") {
+    replaceDialog(api, spec.dialogSize, () => (
+      <CommandLoadingDialog api={api} title={spec.title} />
+    ));
+  }
+
+  try {
+    const result = await buildQuotaDialogCommandOutput({
+      command,
+      arguments: argumentsText,
+      client: createTuiQuotaClient(api),
+      roots: getTuiRuntimeRootHints(api),
+      sessionID,
+      resolveSessionMeta: (id) => getTuiSessionModelMeta(api, id),
+      lastSessionTokenError: state?.lastSessionTokenError,
+      setLastSessionTokenError: state
+        ? (error) => {
+            state.lastSessionTokenError = error;
+          }
+        : undefined,
+      log: async (message, extra) => {
+        await api.client.app.log({
+          body: {
+            service: "quota-toast",
+            level: "debug",
+            message,
+            extra,
+          },
+        });
+      },
+    });
+
+    if (result.state === "noop") {
+      if (destination.type === "dialog") api.ui.dialog.clear();
+      return;
+    }
+
+    if (destination.type === "inline") {
+      await api.client.session.prompt({
+        sessionID: destination.sessionID,
+        noReply: true,
+        parts: [{ type: "text", text: result.output, ignored: true }],
+      });
+      return;
+    }
+
+    replaceDialog(api, result.dialogSize, () => (
+      <CommandOutputDialog api={api} title={result.title} output={result.output} />
+    ));
+  } catch (error) {
+    replaceDialog(api, "large", () => (
+      <CommandErrorDialog api={api} title={spec.title} error={error} />
+    ));
+    api.ui.toast({
+      variant: "error",
+      message: "OpenCode Quota command failed",
+    });
+  }
+}
+
+function registerQuotaDialogCommands(api: TuiPluginApi, commandDisplay: TuiCommandDisplay): void {
+  const commandState: QuotaDialogCommandState = {};
+  const dispose = api.keymap.registerLayer({
+    commands: QUOTA_DIALOG_COMMANDS.map((spec) => ({
+      namespace: "palette",
+      name: `opencode-quota.${spec.id}`,
+      title: spec.title,
+      desc: spec.description,
+      category: "OpenCode Quota",
+      slashName: spec.slashName,
+      run(input?: unknown) {
+        void runQuotaDialogCommandAsync(api, spec.id, commandDisplay, input, commandState);
+      },
+    })),
+    bindings: [],
+  });
+
+  api.lifecycle.onDispose(dispose);
 }
 
 function registerSidebarSlots(api: TuiPluginApi): void {
@@ -471,13 +598,20 @@ function registerSidebarSlots(api: TuiPluginApi): void {
 }
 
 const tui: TuiPlugin = async (api) => {
+  api.lifecycle.onDispose(() => {
+    disposeQuotaTelemetryOwner(createTuiQuotaClient(api));
+  });
+
   let surfaceRegistration;
   try {
     surfaceRegistration = await resolveTuiSurfaceRegistration(api);
   } catch {
+    registerQuotaDialogCommands(api, "inline");
     registerSidebarSlots(api);
     return;
   }
+
+  registerQuotaDialogCommands(api, surfaceRegistration.commandDisplay);
 
   if (surfaceRegistration.sidebar.enabled) {
     registerSidebarSlots(api);
@@ -511,7 +645,9 @@ const tui: TuiPlugin = async (api) => {
   }
 
   if (surfaceRegistration.homeBottom) {
-    compactSlots.home_bottom = () => <HomeBottomView api={api} />;
+    compactSlots.home_bottom = () => (
+      <HomeBottomView api={api} compactHomeBottomEnabled={surfaceRegistration.compact.homeBottom} />
+    );
   }
 
   if (Object.keys(compactSlots).length > 0) {

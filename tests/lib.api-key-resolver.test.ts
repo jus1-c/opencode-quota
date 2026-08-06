@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { homedir } from "os";
 import { join } from "path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
   getOpencodeRuntimeDirCandidates: () => ({
@@ -26,8 +26,10 @@ vi.mock("fs/promises", () => ({
 }));
 
 import {
+  createProviderApiKeyResolver,
   extractAuthApiKeyEntry,
   getApiKeyCheckedPaths,
+  resolveApiKey,
   resolveApiKeyFromEnvAndConfig,
 } from "../src/lib/api-key-resolver.js";
 
@@ -45,7 +47,63 @@ describe("api-key-resolver", () => {
   });
 
   afterEach(() => {
+    delete process.env.TEST_PROVIDER_KEY;
     vi.restoreAllMocks();
+  });
+
+  it("keeps environment first, trusted JSONC before JSON, and auth.json last", async () => {
+    const { existsSync } = await import("fs");
+    const { readFile } = await import("fs/promises");
+    const trustedJsoncPath = join(homedir(), ".config", "opencode", "opencode.jsonc");
+    const readAuth = vi.fn().mockResolvedValue({ apiKey: "auth-key" });
+    const config = {
+      envVars: [{ name: "TEST_PROVIDER_KEY", source: "env" as const }],
+      extractFromConfig: (value: unknown) =>
+        typeof (value as { apiKey?: unknown }).apiKey === "string"
+          ? (value as { apiKey: string }).apiKey
+          : null,
+      extractFromAuth: (value: unknown) =>
+        typeof (value as { apiKey?: unknown })?.apiKey === "string"
+          ? (value as { apiKey: string }).apiKey
+          : null,
+      configJsonSource: "opencode.json" as const,
+      configJsoncSource: "opencode.jsonc" as const,
+      authSource: "auth.json" as const,
+    };
+
+    process.env.TEST_PROVIDER_KEY = "env-key";
+    await expect(resolveApiKey(config, readAuth)).resolves.toEqual({
+      key: "env-key",
+      source: "env",
+    });
+    expect(readFile).not.toHaveBeenCalled();
+    expect(readAuth).not.toHaveBeenCalled();
+
+    delete process.env.TEST_PROVIDER_KEY;
+    (existsSync as any).mockImplementation(
+      (path: string) => path === trustedJsoncPath || path === trustedJsonPath,
+    );
+    (readFile as any).mockImplementation(async (path: string) =>
+      path === trustedJsoncPath
+        ? '{ // preferred\n "apiKey": "jsonc-key",\n}'
+        : JSON.stringify({ apiKey: "json-key" }),
+    );
+    await expect(resolveApiKey(config, readAuth)).resolves.toEqual({
+      key: "jsonc-key",
+      source: "opencode.jsonc",
+    });
+    expect((readFile as any).mock.calls.map((call: unknown[]) => call[0])).toEqual([
+      trustedJsoncPath,
+    ]);
+    expect(readAuth).not.toHaveBeenCalled();
+
+    (existsSync as any).mockReturnValue(false);
+    (readFile as any).mockReset();
+    await expect(resolveApiKey(config, readAuth)).resolves.toEqual({
+      key: "auth-key",
+      source: "auth.json",
+    });
+    expect(readAuth).toHaveBeenCalledOnce();
   });
 
   it("defaults secret-bearing config resolution to trusted global paths only", async () => {
@@ -80,7 +138,9 @@ describe("api-key-resolver", () => {
       source: "opencode.json",
     });
 
-    expect((readFile as any).mock.calls.map((call: unknown[]) => call[0])).toEqual([trustedJsonPath]);
+    expect((readFile as any).mock.calls.map((call: unknown[]) => call[0])).toEqual([
+      trustedJsonPath,
+    ]);
   });
 
   it("defaults checked-path diagnostics to trusted global paths only", async () => {
@@ -95,6 +155,48 @@ describe("api-key-resolver", () => {
         envVarNames: [],
       }),
     ).toEqual([trustedJsonPath]);
+  });
+
+  it("keeps simple and invalid-aware auth policies distinct", async () => {
+    const simpleReadAuth = vi.fn().mockResolvedValue({
+      provider: { type: "oauth", key: "ignored-key" },
+    });
+    const simple = createProviderApiKeyResolver<"config" | "auth.json">({
+      envVars: [],
+      providerKeys: ["provider"],
+      configJsonSource: "config",
+      configJsoncSource: "config",
+      getConfigCandidates: () => [],
+      auth: { readAuth: simpleReadAuth, authSource: "auth.json" },
+    });
+    await expect(simple.resolve()).resolves.toBeNull();
+
+    const invalidReadAuth = vi.fn().mockResolvedValue({
+      provider: { type: "oauth", key: "ignored-key" },
+    });
+    const invalidAware = createProviderApiKeyResolver<"config" | "auth.json", "auth.json">({
+      envVars: [],
+      providerKeys: ["provider"],
+      configJsonSource: "config",
+      configJsoncSource: "config",
+      getConfigCandidates: () => [],
+      auth: {
+        policy: "invalid-aware-api-key",
+        authKeys: ["provider"],
+        authSource: "auth.json",
+        displayName: "Provider",
+        defaultMaxAgeMs: 5_000,
+        readAuth: invalidReadAuth,
+        getAuthPaths: () => ["/tmp/auth.json"],
+      },
+    });
+
+    expect(invalidAware.parseAuth(null)).toEqual({ state: "none" });
+    await expect(invalidAware.resolve({ maxAgeMs: -1 })).resolves.toEqual({
+      state: "invalid",
+      error: 'Unsupported Provider auth type: "oauth"',
+    });
+    expect(invalidReadAuth).toHaveBeenCalledWith(0);
   });
 
   it("extracts only strict api key auth entries", () => {

@@ -1,18 +1,39 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
 import {
   expectAttemptedWithErrorLabel,
   expectAttemptedWithNoErrors,
   expectNotAttempted,
+  visibleEntries,
 } from "./helpers/provider-assertions.js";
 
-const mocks = vi.hoisted(() => ({
-  fetchWithTimeout: vi.fn(),
-  resolveOpenCodeGoConfigCached: vi.fn(),
-}));
+const mocks = vi.hoisted(() => {
+  const fetchResponse = vi.fn();
+  return {
+    fetchResponse,
+    fetchWithTimeout: vi.fn(
+      async (
+        _url: string,
+        options: {
+          consume: (response: Response, signal: AbortSignal) => Promise<unknown> | unknown;
+        },
+      ) => {
+        const response = await fetchResponse();
+        return await options.consume(response, new AbortController().signal);
+      },
+    ),
+    resolveOpenCodeGoConfigCached: vi.fn(),
+  };
+});
 
 vi.mock("../src/lib/opencode-go-config.js", () => ({
   resolveOpenCodeGoConfigCached: mocks.resolveOpenCodeGoConfigCached,
+  getOpenCodeGoConfigDiagnostics: vi.fn(async () => ({
+    state: "configured",
+    source: "test",
+    missing: null,
+    error: null,
+    checkedPaths: [],
+  })),
   DEFAULT_OPENCODE_GO_CONFIG_CACHE_MAX_AGE_MS: 30_000,
 }));
 
@@ -20,8 +41,8 @@ vi.mock("../src/lib/http.js", () => ({
   fetchWithTimeout: mocks.fetchWithTimeout,
 }));
 
+import { _parseDataSlotFormat, _parseWindowUsage } from "../src/lib/opencode-go.js";
 import { opencodeGoProvider } from "../src/providers/opencode-go.js";
-import { _parseWindowUsage, _parseDataSlotFormat } from "../src/lib/opencode-go.js";
 
 function mockConfigNone() {
   mocks.resolveOpenCodeGoConfigCached.mockResolvedValueOnce({ state: "none" });
@@ -144,7 +165,12 @@ function buildDataSlotOnlyHtml(
       const usage = windows[window];
       if (!usage) return "";
       const [usagePercent, resetTime] = usage;
-      const label = window === "rolling" ? "Rolling Usage" : window === "weekly" ? "Weekly Usage" : "Monthly Usage";
+      const label =
+        window === "rolling"
+          ? "Rolling Usage"
+          : window === "weekly"
+            ? "Weekly Usage"
+            : "Monthly Usage";
       return `<div data-slot="usage-item">
         <div data-slot="usage-header"><span data-slot="usage-label">${label}</span><span data-slot="usage-value"><!--$-->${usagePercent}<!--/-->%</span></div>
         <div data-slot="progress"><div data-slot="progress-bar" style="width: ${usagePercent}%;"></div></div>
@@ -157,14 +183,14 @@ function buildDataSlotOnlyHtml(
 }
 
 function mockDashboardSuccess(html: string) {
-  mocks.fetchWithTimeout.mockResolvedValueOnce({
+  mocks.fetchResponse.mockResolvedValueOnce({
     ok: true,
     text: async () => html,
   });
 }
 
 function mockDashboardHttpFailure(status: number, text: string) {
-  mocks.fetchWithTimeout.mockResolvedValueOnce({
+  mocks.fetchResponse.mockResolvedValueOnce({
     ok: false,
     status,
     text: async () => text,
@@ -191,8 +217,7 @@ describe("opencode-go provider", () => {
     await runProviderFetchWithConfig({ requestTimeoutMs: 5000 });
     expect(mocks.fetchWithTimeout).toHaveBeenLastCalledWith(
       expect.any(String),
-      expect.any(Object),
-      10_000,
+      expect.objectContaining({ timeoutMs: 10_000, consume: expect.any(Function) }),
     );
 
     mockConfigConfigured();
@@ -201,8 +226,7 @@ describe("opencode-go provider", () => {
     await runProviderFetchWithConfig({ requestTimeoutMs: 12000, requestTimeoutMsConfigured: true });
     expect(mocks.fetchWithTimeout).toHaveBeenLastCalledWith(
       expect.any(String),
-      expect.any(Object),
-      12000,
+      expect.objectContaining({ timeoutMs: 12000, consume: expect.any(Function) }),
     );
   });
 
@@ -289,12 +313,17 @@ describe("opencode-go provider", () => {
 
   it("defaults to available windows when opencodeGoWindows is not set", async () => {
     mockConfigConfigured();
-    mockDashboardSuccess(buildPartialDashboardHtml({ rolling: [7, 18000], monthly: [16, 2480000] }));
+    mockDashboardSuccess(
+      buildPartialDashboardHtml({ rolling: [7, 18000], monthly: [16, 2480000] }),
+    );
 
     const out = await runProviderFetch();
 
     expectAttemptedWithNoErrors(out);
-    expect(out.entries.map((entry) => entry.name)).toEqual(["OpenCode Go 5h", "OpenCode Go Monthly"]);
+    expect(out.entries.map((entry) => entry.name)).toEqual([
+      "OpenCode Go 5h",
+      "OpenCode Go Monthly",
+    ]);
   });
 
   it("succeeds when weekly is selected and only weeklyUsage is present", async () => {
@@ -315,7 +344,9 @@ describe("opencode-go provider", () => {
 
   it("returns a clear error when a selected weekly window is missing", async () => {
     mockConfigConfigured();
-    mockDashboardSuccess(buildPartialDashboardHtml({ rolling: [7, 18000], monthly: [16, 2480000] }));
+    mockDashboardSuccess(
+      buildPartialDashboardHtml({ rolling: [7, 18000], monthly: [16, 2480000] }),
+    );
 
     const out = await runProviderFetch(["weekly"]);
 
@@ -353,12 +384,17 @@ describe("opencode-go provider", () => {
 
   it("treats reordered full window selection as the default missing-window-tolerant selection", async () => {
     mockConfigConfigured();
-    mockDashboardSuccess(buildPartialDashboardHtml({ rolling: [7, 18000], monthly: [16, 2480000] }));
+    mockDashboardSuccess(
+      buildPartialDashboardHtml({ rolling: [7, 18000], monthly: [16, 2480000] }),
+    );
 
     const out = await runProviderFetch(["weekly", "monthly", "rolling"]);
 
     expectAttemptedWithNoErrors(out);
-    expect(out.entries.map((entry) => entry.name)).toEqual(["OpenCode Go 5h", "OpenCode Go Monthly"]);
+    expect(out.entries.map((entry) => entry.name)).toEqual([
+      "OpenCode Go 5h",
+      "OpenCode Go Monthly",
+    ]);
   });
 
   it("parses resetInSec-first field order", async () => {
@@ -389,12 +425,14 @@ describe("opencode-go provider", () => {
 
     const out = await runProviderFetch();
     expectAttemptedWithErrorLabel(out, "OpenCode Go");
-    expect(out.errors[0]?.message).toContain("Could not parse any known OpenCode Go dashboard usage windows");
+    expect(out.errors[0]?.message).toContain(
+      "Could not parse any known OpenCode Go dashboard usage windows",
+    );
   });
 
   it("returns error on network failure", async () => {
     mockConfigConfigured();
-    mocks.fetchWithTimeout.mockRejectedValueOnce(new Error("network timeout"));
+    mocks.fetchResponse.mockRejectedValueOnce(new Error("network timeout"));
 
     const out = await runProviderFetch();
     expectAttemptedWithErrorLabel(out, "OpenCode Go");
@@ -521,7 +559,9 @@ describe("opencode-go provider", () => {
 
     const out = await runProviderFetch();
     expectAttemptedWithErrorLabel(out, "OpenCode Go");
-    expect(out.errors[0]?.message).toContain("Could not parse any known OpenCode Go dashboard usage windows");
+    expect(out.errors[0]?.message).toContain(
+      "Could not parse any known OpenCode Go dashboard usage windows",
+    );
   });
 });
 
@@ -554,8 +594,10 @@ describe("opencode-go isAvailable", () => {
 });
 
 describe("_parseWindowUsage", () => {
-  const rollingRePctFirst = /rollingUsage:\$R\[\d+\]=\{[^}]*usagePercent:(\d+)[^}]*resetInSec:(\d+)[^}]*\}/;
-  const rollingReResetFirst = /rollingUsage:\$R\[\d+\]=\{[^}]*resetInSec:(\d+)[^}]*usagePercent:(\d+)[^}]*\}/;
+  const rollingRePctFirst =
+    /rollingUsage:\$R\[\d+\]=\{[^}]*usagePercent:(\d+)[^}]*resetInSec:(\d+)[^}]*\}/;
+  const rollingReResetFirst =
+    /rollingUsage:\$R\[\d+\]=\{[^}]*resetInSec:(\d+)[^}]*usagePercent:(\d+)[^}]*\}/;
 
   it("returns null for empty string", () => {
     expect(_parseWindowUsage("", rollingRePctFirst, rollingReResetFirst)).toBeNull();

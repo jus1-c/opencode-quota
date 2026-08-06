@@ -1,11 +1,29 @@
-import type { QuotaProvider, QuotaProviderContext, QuotaProviderResult } from "../lib/entries.js";
-import { hasGeminiCliQuotaRuntimeAvailable, queryGeminiCliQuota } from "../lib/google-gemini-cli.js";
+import { sanitizeDisplayText } from "../lib/display-sanitize.js";
+import type {
+  QuotaProvider,
+  QuotaProviderContext,
+  QuotaProviderResult,
+  QuotaToastEntry,
+} from "../lib/entries.js";
+import {
+  hasGeminiCliQuotaRuntimeAvailable,
+  inspectGeminiCliAuthPresence,
+  queryGeminiCliQuota,
+} from "../lib/google-gemini-cli.js";
+import { inspectGeminiCliCompanionPresence } from "../lib/google-gemini-cli-companion.js";
 import { parseProviderModelRef } from "../lib/provider-model-matching.js";
 import {
+  createGoogleAccountLabelMap,
   formatGoogleAccountErrors,
   formatGoogleAccountLabel,
 } from "./google-account-format.js";
-import { attemptedErrorResult, attemptedResult, notAttemptedResult } from "./result-helpers.js";
+import {
+  attemptedErrorResult,
+  attemptedResult,
+  notAttemptedResult,
+  statusDetailsFromRecord,
+  withStatusDetails,
+} from "./result-helpers.js";
 
 function isGeminiCliModel(model: string): boolean {
   const { providerId, modelId } = parseProviderModelRef(model);
@@ -35,6 +53,24 @@ export const googleGeminiCliProvider: QuotaProvider = {
   },
 
   async fetch(ctx: QuotaProviderContext): Promise<QuotaProviderResult> {
+    const [auth, companion] = await Promise.all([
+      inspectGeminiCliAuthPresence(ctx.client),
+      inspectGeminiCliCompanionPresence(),
+    ]);
+    const statusDetails = statusDetailsFromRecord({
+      auth_state: auth.state,
+      auth_source: auth.sourceKey ?? "(none)",
+      account_count: String(auth.accountCount),
+      valid_account_count: String(auth.validAccountCount),
+      companion_package_state: companion.state,
+      companion_package_path:
+        companion.state === "present" || companion.state === "invalid"
+          ? (companion.resolvedPath ?? "(none)")
+          : "(none)",
+      auth_error: auth.state === "invalid" ? sanitizeDisplayText(auth.error) : undefined,
+      companion_error:
+        companion.state !== "present" ? sanitizeDisplayText(companion.error) : undefined,
+    });
     const result = await queryGeminiCliQuota(ctx.client, {
       requestTimeoutMs: ctx.config?.requestTimeoutMsConfigured
         ? ctx.config.requestTimeoutMs
@@ -42,15 +78,25 @@ export const googleGeminiCliProvider: QuotaProvider = {
     });
 
     if (!result) {
-      return notAttemptedResult();
+      return withStatusDetails(notAttemptedResult(), statusDetails);
     }
 
     if (!result.success) {
-      return attemptedErrorResult("Gemini CLI", result.error);
+      return withStatusDetails(attemptedErrorResult("Gemini CLI", result.error), statusDetails);
     }
 
-    const entries = result.buckets.map((bucket) => {
-      const emailLabel = formatGoogleAccountLabel(bucket.accountEmail, "domainHint");
+    const accountLabels = createGoogleAccountLabelMap(
+      [
+        ...result.buckets.map((bucket) => bucket.accountEmail),
+        ...(result.errors ?? []).map((error) => error.email),
+      ],
+      "domainHint",
+    );
+    const entries: QuotaToastEntry[] = result.buckets.map((bucket) => {
+      const emailLabel = bucket.accountEmail
+        ? (accountLabels.get(bucket.accountEmail) ??
+          formatGoogleAccountLabel(bucket.accountEmail, "domainHint"))
+        : formatGoogleAccountLabel(undefined, "domainHint");
       const parsedRemaining = bucket.remainingAmount
         ? Number.parseInt(bucket.remainingAmount, 10)
         : Number.NaN;
@@ -63,8 +109,15 @@ export const googleGeminiCliProvider: QuotaProvider = {
         .join(" ");
 
       return {
+        accounting: {
+          resultType: "quota",
+          acquisitionMethod: "remote_api",
+          ownership: "maintained",
+          authority: "provider_reported",
+          ...(bucket.accountEmail ? { sourceId: bucket.accountEmail } : {}),
+        },
         name: `${bucket.displayName} (${emailLabel})`,
-        group: "Gemini CLI",
+        group: `Gemini CLI (${emailLabel})`,
         label: `${bucket.displayName}:`,
         ...(right ? { right } : {}),
         percentRemaining: bucket.percentRemaining,
@@ -72,9 +125,16 @@ export const googleGeminiCliProvider: QuotaProvider = {
       };
     });
 
-    return attemptedResult(entries, formatGoogleAccountErrors(result.errors, "domainHint"), {
-      singleWindowDisplayName: "Gemini CLI",
-      singleWindowShowRight: true,
-    });
+    return withStatusDetails(
+      attemptedResult(
+        entries,
+        formatGoogleAccountErrors(result.errors, "domainHint", accountLabels),
+        {
+          singleWindowDisplayName: "Gemini CLI",
+          singleWindowShowRight: true,
+        },
+      ),
+      statusDetails,
+    );
   },
 };

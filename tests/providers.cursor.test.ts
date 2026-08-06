@@ -1,14 +1,28 @@
 import { describe, expect, it, vi } from "vitest";
-
-import { expectAttemptedWithNoErrors, expectNotAttempted } from "./helpers/provider-assertions.js";
 import { cursorProvider } from "../src/providers/cursor.js";
+import {
+  expectAttemptedWithNoErrors,
+  expectNotAttempted,
+  visibleEntries,
+} from "./helpers/provider-assertions.js";
 
 vi.mock("../src/lib/provider-availability.js", () => ({
   isCanonicalProviderAvailable: vi.fn(),
 }));
 
 vi.mock("../src/lib/cursor-detection.js", () => ({
-  inspectCursorOpenCodeIntegration: vi.fn(),
+  CURSOR_CANONICAL_PLUGIN_PACKAGE: "@playwo/opencode-cursor-oauth",
+  inspectCursorAuthPresence: vi.fn(async () => ({
+    state: "missing",
+    presentPaths: [],
+    candidatePaths: [],
+  })),
+  inspectCursorOpenCodeIntegration: vi.fn(async () => ({
+    pluginEnabled: false,
+    providerConfigured: false,
+    matchedPaths: [],
+    checkedPaths: [],
+  })),
 }));
 
 vi.mock("../src/lib/cursor-usage.js", () => ({
@@ -99,7 +113,7 @@ describe("cursor provider", () => {
     } as any);
 
     expectAttemptedWithNoErrors(out);
-    expect(out.entries).toEqual([
+    expect(visibleEntries(out.entries, "cursor")).toEqual([
       {
         kind: "value",
         name: "Cursor",
@@ -134,7 +148,7 @@ describe("cursor provider", () => {
     } as any);
 
     expect(out.attempted).toBe(true);
-    expect(out.entries).toEqual([
+    expect(visibleEntries(out.entries, "cursor")).toEqual([
       {
         kind: "value",
         name: "Cursor API (Pro)",

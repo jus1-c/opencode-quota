@@ -24,6 +24,12 @@ function buildEntries(result: Extract<NonNullable<Awaited<ReturnType<typeof quer
   if (result.windows.fiveHour) {
     const window = result.windows.fiveHour;
     entries.push({
+      accounting: {
+        resultType: "quota",
+        acquisitionMethod: "remote_api",
+        ownership: "maintained",
+        authority: "provider_reported",
+      },
       name: `${label} 5h`,
       group: label,
       label: "5h:",
@@ -35,6 +41,12 @@ function buildEntries(result: Extract<NonNullable<Awaited<ReturnType<typeof quer
   if (result.windows.weekly) {
     const window = result.windows.weekly;
     entries.push({
+      accounting: {
+        resultType: "quota",
+        acquisitionMethod: "remote_api",
+        ownership: "maintained",
+        authority: "provider_reported",
+      },
       name: `${label} Weekly`,
       group: label,
       label: "Weekly:",

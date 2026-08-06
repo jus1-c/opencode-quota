@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { isCommandHandledError } from "../src/lib/command-handled.js";
 import {
-  createConfigModuleMock,
   createPluginTestClient as createClient,
+  createConfigModuleMock,
   createPluginToolMockModule,
   createPricingModuleMock,
   createProvidersRegistryModuleMock,
@@ -54,6 +54,35 @@ type PluginHooks = {
     sessionID: string;
   }) => Promise<void> | void;
 };
+
+type PluginConfigFixture = {
+  command?: Record<string, { template: string; description: string }>;
+  agent?: Record<string, unknown>;
+  default_agent?: string;
+};
+
+const AGENT_NORMALIZATION_CASES = [
+  {
+    name: "exact",
+    agent: { "\u200Bplanner": {} },
+    defaultAgent: "\u200Bplanner",
+    expectedDefaultAgent: "\u200Bplanner",
+  },
+  {
+    name: "unique",
+    agent: { "\u200Bplanner": {}, coder: {} },
+    defaultAgent: "planner",
+    expectedDefaultAgent: "\u200Bplanner",
+  },
+  {
+    name: "ambiguous",
+    agent: { "\u200Bplanner": {}, "\u200Cplanner": {} },
+    defaultAgent: "planner",
+    expectedDefaultAgent: "planner",
+  },
+] as const;
+
+const PLUGIN_ORDERS = ["quota-first", "remapper-first"] as const;
 
 async function loadPluginHooks(client: ReturnType<typeof createClient>): Promise<PluginHooks> {
   const { QuotaToastPlugin } = await import("../src/plugin.js");
@@ -150,6 +179,58 @@ describe("plugin command handled boundary", () => {
     expect(client.session.prompt).not.toHaveBeenCalled();
   });
 
+  for (const order of PLUGIN_ORDERS) {
+    for (const scenario of AGENT_NORMALIZATION_CASES) {
+      it(`normalizes the default agent for ${order} ordering with an ${scenario.name} match`, async () => {
+        const client = createClient();
+        const hooks = await loadPluginHooks(client);
+        const cfg: PluginConfigFixture = {};
+        let configAtPrompt:
+          | { defaultAgent: string | undefined; agentKeys: string[]; namesExistingAgent: boolean }
+          | undefined;
+
+        if (order === "quota-first" && scenario.name === "unique") {
+          client.session.prompt.mockImplementationOnce(async () => {
+            const agentKeys = Object.keys(cfg.agent ?? {});
+            configAtPrompt = {
+              defaultAgent: cfg.default_agent,
+              agentKeys,
+              namesExistingAgent:
+                cfg.default_agent !== undefined && agentKeys.includes(cfg.default_agent),
+            };
+            return {};
+          });
+        }
+
+        const applyAgentRemap = () => {
+          cfg.agent = { ...scenario.agent };
+          cfg.default_agent = scenario.defaultAgent;
+        };
+
+        if (order === "remapper-first") applyAgentRemap();
+        await hooks.config?.(cfg);
+        if (order === "quota-first") applyAgentRemap();
+
+        await expectHandled(
+          hooks["command.execute.before"]?.({
+            command: "quota",
+            sessionID: `session-agent-order-${order}-${scenario.name}`,
+          }),
+        );
+
+        expect(cfg.default_agent).toBe(scenario.expectedDefaultAgent);
+        expect(client.session.prompt).toHaveBeenCalledTimes(1);
+        if (order === "quota-first" && scenario.name === "unique") {
+          expect(configAtPrompt).toEqual({
+            defaultAgent: "\u200Bplanner",
+            agentKeys: ["\u200Bplanner", "coder"],
+            namesExistingAgent: true,
+          });
+        }
+      });
+    }
+  }
+
   it("leaves non-quota server commands untouched", async () => {
     const client = createClient();
     const hooks = await loadPluginHooks(client);
@@ -188,7 +269,68 @@ describe("plugin command handled boundary", () => {
       }),
     );
     expect(getPromptText(client)).toContain("Quota unavailable");
-    expect(getPromptText(client)).toContain("No quota providers detected");
+    expect(getPromptText(client)).toContain("No provider data available");
+  });
+
+  it("injects clean plain text with noReply/ignored when /quota has no current model", async () => {
+    mocks.loadConfig.mockResolvedValueOnce(
+      makeQuotaToastTestConfig({
+        enabled: true,
+        onlyCurrentModel: false,
+        showSessionTokens: false,
+        tuiCommandDisplay: "dialog",
+      }),
+    );
+    const provider = {
+      id: "openai",
+      isAvailable: vi.fn().mockResolvedValue(true),
+      fetch: vi.fn().mockResolvedValue({
+        attempted: true,
+        entries: [
+          {
+            accounting: {
+              resultType: "quota",
+              acquisitionMethod: "remote_api",
+              ownership: "maintained",
+              authority: "provider_reported",
+            },
+            name: "OpenAI Weekly",
+            group: "OpenAI",
+            label: "Weekly:",
+            percentRemaining: 80,
+          },
+        ],
+        errors: [],
+      }),
+    };
+    mocks.getProviders.mockReturnValue([provider]);
+    const client = createClient();
+
+    await runServerCommand({
+      command: "quota",
+      sessionID: "session-zero-model",
+      client,
+    });
+
+    expect(provider.fetch).toHaveBeenCalledTimes(1);
+    expect(client.session.prompt).toHaveBeenCalledWith({
+      path: { id: "session-zero-model" },
+      body: {
+        noReply: true,
+        parts: [
+          {
+            type: "text",
+            ignored: true,
+            text: expect.stringContaining("  Week quota"),
+          },
+        ],
+      },
+    });
+    expect(getPromptText(client)).toMatch(/\n {2}Week quota\s+[█░]{10}\s+80% left/u);
+    expect(getPromptText(client)).toMatch(/^Quota \(\/quota\)/u);
+    expect(getPromptText(client)).not.toContain("```");
+    expect(getPromptText(client)).not.toMatch(/^#{1,6} /mu);
+    expect(getPromptText(client)).not.toContain("No enabled quota providers matched");
   });
 
   it("handles /tokens_between arguments through one inline injection", async () => {
@@ -242,10 +384,11 @@ describe("plugin command handled boundary", () => {
   });
 
   it("still builds deterministic quota dialog output without session.prompt injection", async () => {
+    const isAvailable = vi.fn().mockRejectedValue(new Error("boom"));
     mocks.getProviders.mockReturnValue([
       {
         id: "boom-provider",
-        isAvailable: vi.fn().mockRejectedValue(new Error("boom")),
+        isAvailable,
         fetch: vi.fn(),
       },
     ]);
@@ -255,7 +398,8 @@ describe("plugin command handled boundary", () => {
 
     expect(result.state).toBe("output");
     expect(result.state === "output" ? result.output : "").toContain("Quota unavailable");
-    expect(result.state === "output" ? result.output : "").toContain("No quota providers detected");
+    expect(result.state === "output" ? result.output : "").toContain("No provider data available");
+    expect(isAvailable).toHaveBeenCalledOnce();
     expect(client.session.prompt).not.toHaveBeenCalled();
   });
 

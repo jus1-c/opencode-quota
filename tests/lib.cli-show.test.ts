@@ -1,9 +1,20 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockProviders, runtimeDirs } = vi.hoisted(() => ({
+const TEST_ACCOUNTING = {
+  resultType: "quota",
+  acquisitionMethod: "remote_api",
+  ownership: "maintained",
+  authority: "provider_reported",
+} as const;
+
+const { authMocks, mockProviders, runtimeDirs } = vi.hoisted(() => ({
+  authMocks: {
+    anthropicConfigured: false,
+    kimiState: "none" as "none" | "configured",
+  },
   mockProviders: [] as any[],
   runtimeDirs: {
     value: {
@@ -13,6 +24,15 @@ const { mockProviders, runtimeDirs } = vi.hoisted(() => ({
       stateDirs: [] as string[],
     },
   },
+}));
+
+vi.mock("../src/lib/anthropic.js", () => ({
+  hasAnthropicCredentialsConfigured: vi.fn(async () => authMocks.anthropicConfigured),
+}));
+
+vi.mock("../src/lib/kimi-auth.js", () => ({
+  DEFAULT_KIMI_AUTH_CACHE_MAX_AGE_MS: 30_000,
+  resolveKimiAuthCached: vi.fn(async () => ({ state: authMocks.kimiState })),
 }));
 
 vi.mock("../src/providers/registry.js", () => ({
@@ -29,7 +49,7 @@ vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
   }),
 }));
 
-import { runCliShowCommand } from "../src/lib/cli-show.js";
+import { createCliQuotaClient, runCliShowCommand } from "../src/lib/cli-show.js";
 import { __resetQuotaStateForTests } from "../src/lib/quota-state.js";
 
 function createCaptureStream() {
@@ -54,6 +74,8 @@ describe("runCliShowCommand", () => {
   let savedConfigDir: string | undefined;
 
   beforeEach(() => {
+    authMocks.anthropicConfigured = false;
+    authMocks.kimiState = "none";
     savedConfigDir = process.env.OPENCODE_CONFIG_DIR;
     delete process.env.OPENCODE_CONFIG_DIR;
     tempDir = mkdtempSync(join(tmpdir(), "opencode-quota-cli-show-"));
@@ -79,13 +101,29 @@ describe("runCliShowCommand", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
+  it("adds offline Anthropic and Kimi runtime ids only when local authentication exists", async () => {
+    writeFileSync(join(workspaceDir, "opencode.json"), "{}", "utf8");
+
+    const unauthenticated = await createCliQuotaClient({
+      configRootDir: workspaceDir,
+    }).config.providers();
+    expect(unauthenticated.data?.providers).toEqual([]);
+
+    authMocks.anthropicConfigured = true;
+    authMocks.kimiState = "configured";
+    const authenticated = await createCliQuotaClient({
+      configRootDir: workspaceDir,
+    }).config.providers();
+    expect(authenticated.data?.providers).toEqual([{ id: "anthropic" }, { id: "kimi-for-coding" }]);
+  });
+
   it("renders a compact quota glance and returns zero when quota rows are available", async () => {
     const provider = {
       id: "synthetic",
       isAvailable: vi.fn().mockResolvedValue(true),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
-        entries: [{ name: "Synthetic Weekly", percentRemaining: 75 }],
+        entries: [{ accounting: TEST_ACCOUNTING, name: "Synthetic Weekly", percentRemaining: 75 }],
         errors: [],
       }),
     };
@@ -120,13 +158,70 @@ describe("runCliShowCommand", () => {
     expect(provider.fetch).toHaveBeenCalledOnce();
   });
 
+  it("renders two Antigravity account labels in human-readable CLI output", async () => {
+    const provider = {
+      id: "google-antigravity",
+      isAvailable: vi.fn().mockResolvedValue(true),
+      fetch: vi.fn().mockResolvedValue({
+        attempted: true,
+        entries: [
+          {
+            accounting: { ...TEST_ACCOUNTING, sourceId: "alice@example.com" },
+            name: "Antigravity (ali…): Claude",
+            group: "[Antigravity (ali…)]",
+            label: "Claude:",
+            percentRemaining: 0,
+          },
+          {
+            accounting: { ...TEST_ACCOUNTING, sourceId: "bob@example.com" },
+            name: "Antigravity (bob…): Claude",
+            group: "[Antigravity (bob…)]",
+            label: "Claude:",
+            percentRemaining: 0,
+          },
+        ],
+        errors: [],
+        presentation: { classicStrategy: "preserve" },
+      }),
+    };
+    mockProviders.push(provider);
+    writeFileSync(
+      join(workspaceDir, "opencode.json"),
+      JSON.stringify({
+        experimental: {
+          quotaToast: {
+            enabledProviders: ["google-antigravity"],
+            formatStyle: "allWindows",
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const stdout = createCaptureStream();
+    const stderr = createCaptureStream();
+    const code = await runCliShowCommand({
+      argv: [],
+      cwd: workspaceDir,
+      stdout: stdout.stream as any,
+      stderr: stderr.stream as any,
+    });
+
+    expect(code).toBe(0);
+    expect(stdout.output).toContain("[Antigravity (ali…)]");
+    expect(stdout.output).toContain("[Antigravity (bob…)]");
+    expect(stdout.output.match(/Claude/g)).toHaveLength(2);
+    expect(stdout.output).not.toContain("Google Antigravity");
+    expect(stderr.output).toBe("");
+  });
+
   it("normalizes --provider aliases and uses the provider as an invocation override", async () => {
     const copilotProvider = {
       id: "copilot",
       isAvailable: vi.fn().mockResolvedValue(true),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
-        entries: [{ name: "Copilot", percentRemaining: 50 }],
+        entries: [{ accounting: TEST_ACCOUNTING, name: "Copilot", percentRemaining: 50 }],
         errors: [],
       }),
     };
@@ -312,7 +407,16 @@ describe("runCliShowCommand", () => {
       isAvailable: vi.fn().mockResolvedValue(true),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
-        entries: [{ name: "Copilot", group: "Copilot (personal)", label: "Quota:", right: "0/300", percentRemaining: 100 }],
+        entries: [
+          {
+            accounting: TEST_ACCOUNTING,
+            name: "Copilot",
+            group: "Copilot (personal)",
+            label: "Quota:",
+            right: "0/300",
+            percentRemaining: 100,
+          },
+        ],
         errors: [],
       }),
     };
@@ -321,7 +425,16 @@ describe("runCliShowCommand", () => {
       isAvailable: vi.fn().mockResolvedValue(true),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
-        entries: [{ name: "Gemini Pro", group: "Gemini CLI", label: "Gemini Pro:", right: "840 left", percentRemaining: 84 }],
+        entries: [
+          {
+            accounting: TEST_ACCOUNTING,
+            name: "Gemini Pro",
+            group: "Gemini CLI",
+            label: "Gemini Pro:",
+            right: "840 left",
+            percentRemaining: 84,
+          },
+        ],
         errors: [],
       }),
     };
@@ -365,7 +478,7 @@ describe("runCliShowCommand", () => {
       }),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
-        entries: [{ name: "Copilot", percentRemaining: 88 }],
+        entries: [{ accounting: TEST_ACCOUNTING, name: "Copilot", percentRemaining: 88 }],
         errors: [],
       }),
     };
@@ -401,7 +514,7 @@ describe("runCliShowCommand", () => {
       isAvailable: vi.fn().mockResolvedValue(true),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
-        entries: [{ name: "Synthetic", percentRemaining: 75 }],
+        entries: [{ accounting: TEST_ACCOUNTING, name: "Synthetic", percentRemaining: 75 }],
         errors: [],
       }),
     };
@@ -440,7 +553,7 @@ describe("runCliShowCommand", () => {
     expect(jsonErr.output).toBe("");
 
     const parsed = JSON.parse(jsonOut.output);
-    expect(parsed).toHaveProperty("version", 1);
+    expect(parsed).toHaveProperty("version", 2);
     expect(parsed).toHaveProperty("exportedAt");
     expect(parsed).toHaveProperty("fromCache", true);
     expect(parsed).toHaveProperty("cacheAgeSeconds");
@@ -448,7 +561,8 @@ describe("runCliShowCommand", () => {
     expect(parsed.providers.synthetic.status).toBe("ok");
     expect(parsed.providers.synthetic.entries[0].name).toBe("Synthetic");
     expect(parsed.providers.synthetic.entries[0].percentRemaining).toBe(75);
-    expect(parsed.providers.synthetic.entries[0].unlimited).toBe(false);
+    expect(parsed.providers.synthetic.entries[0].renderType).toBe("percent");
+    expect(parsed.providers.synthetic.entries[0]).not.toHaveProperty("unlimited");
     expect(provider.fetch).toHaveBeenCalledTimes(1); // still only called from text path
   });
 
@@ -458,7 +572,7 @@ describe("runCliShowCommand", () => {
       isAvailable: vi.fn().mockResolvedValue(true),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
-        entries: [{ name: "Synthetic", percentRemaining: 100 }],
+        entries: [{ accounting: TEST_ACCOUNTING, name: "Synthetic", percentRemaining: 100 }],
         errors: [],
       }),
     };
@@ -491,45 +605,42 @@ describe("runCliShowCommand", () => {
   it.each([
     [80, "50", 0],
     [30, "50", 1],
-  ])(
-    "--threshold exits %s when a provider is at %s%% remaining",
-    async (percentRemaining, threshold, expectedCode) => {
-      const provider = {
-        id: "synthetic",
-        isAvailable: vi.fn().mockResolvedValue(true),
-        fetch: vi.fn().mockResolvedValue({
-          attempted: true,
-          entries: [{ name: "Synthetic", percentRemaining }],
-          errors: [],
-        }),
-      };
-      mockProviders.push(provider);
-      writeFileSync(
-        join(workspaceDir, "opencode.json"),
-        JSON.stringify({
-          experimental: { quotaToast: { enabledProviders: ["synthetic"] } },
-        }),
-        "utf8",
-      );
+  ])("--threshold exits %s when a provider is at %s%% remaining", async (percentRemaining, threshold, expectedCode) => {
+    const provider = {
+      id: "synthetic",
+      isAvailable: vi.fn().mockResolvedValue(true),
+      fetch: vi.fn().mockResolvedValue({
+        attempted: true,
+        entries: [{ accounting: TEST_ACCOUNTING, name: "Synthetic", percentRemaining }],
+        errors: [],
+      }),
+    };
+    mockProviders.push(provider);
+    writeFileSync(
+      join(workspaceDir, "opencode.json"),
+      JSON.stringify({
+        experimental: { quotaToast: { enabledProviders: ["synthetic"] } },
+      }),
+      "utf8",
+    );
 
-      // Populate cache.
-      await runCliShowCommand({
-        argv: [],
-        cwd: workspaceDir,
-        stdout: { write: () => true } as any,
-        stderr: { write: () => true } as any,
-      });
+    // Populate cache.
+    await runCliShowCommand({
+      argv: [],
+      cwd: workspaceDir,
+      stdout: { write: () => true } as any,
+      stderr: { write: () => true } as any,
+    });
 
-      const jsonCode = await runCliShowCommand({
-        argv: ["--json", "--threshold", threshold],
-        cwd: workspaceDir,
-        stdout: { write: () => true } as any,
-        stderr: { write: () => true } as any,
-      });
+    const jsonCode = await runCliShowCommand({
+      argv: ["--json", "--threshold", threshold],
+      cwd: workspaceDir,
+      stdout: { write: () => true } as any,
+      stderr: { write: () => true } as any,
+    });
 
-      expect(jsonCode).toBe(expectedCode);
-    },
-  );
+    expect(jsonCode).toBe(expectedCode);
+  });
 
   it("--threshold exits 2 when no provider is ok", async () => {
     // Provider that is unavailable (no cache populated).
@@ -538,7 +649,7 @@ describe("runCliShowCommand", () => {
       isAvailable: vi.fn().mockResolvedValue(true),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
-        entries: [{ name: "Synthetic", percentRemaining: 100 }],
+        entries: [{ accounting: TEST_ACCOUNTING, name: "Synthetic", percentRemaining: 100 }],
         errors: [],
       }),
     };
@@ -569,7 +680,15 @@ describe("runCliShowCommand", () => {
       isAvailable: vi.fn().mockResolvedValue(true),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
-        entries: [{ name: "Synthetic", kind: "value", value: "$42", label: "Usage:" }],
+        entries: [
+          {
+            accounting: TEST_ACCOUNTING,
+            name: "Synthetic",
+            kind: "value",
+            value: "$42",
+            label: "Usage:",
+          },
+        ],
         errors: [],
       }),
     };
@@ -599,13 +718,55 @@ describe("runCliShowCommand", () => {
     expect(jsonCode).toBe(2);
   });
 
+  it("--threshold exits 2 for partial cached results instead of passing incomplete data", async () => {
+    const provider = {
+      id: "synthetic",
+      isAvailable: vi.fn().mockResolvedValue(true),
+      fetch: vi.fn().mockResolvedValue({
+        attempted: true,
+        entries: [{ accounting: TEST_ACCOUNTING, name: "Synthetic", percentRemaining: 80 }],
+        errors: [{ label: "Synthetic secondary", message: "quota endpoint unavailable" }],
+      }),
+    };
+    mockProviders.push(provider);
+    writeFileSync(
+      join(workspaceDir, "opencode.json"),
+      JSON.stringify({
+        experimental: { quotaToast: { enabledProviders: ["synthetic"] } },
+      }),
+      "utf8",
+    );
+
+    await runCliShowCommand({
+      argv: [],
+      cwd: workspaceDir,
+      stdout: { write: () => true } as any,
+      stderr: { write: () => true } as any,
+    });
+
+    const stdout = createCaptureStream();
+    const code = await runCliShowCommand({
+      argv: ["--json", "--threshold", "50"],
+      cwd: workspaceDir,
+      stdout: stdout.stream as any,
+      stderr: { write: () => true } as any,
+    });
+
+    expect(code).toBe(2);
+    expect(JSON.parse(stdout.output).providers.synthetic).toMatchObject({
+      status: "partial",
+      entries: [expect.objectContaining({ percentRemaining: 80 })],
+      errors: [{ label: "Synthetic secondary", message: "quota endpoint unavailable" }],
+    });
+  });
+
   it("--json --provider copilot only includes the copilot key", async () => {
     const copilotProvider = {
       id: "copilot",
       isAvailable: vi.fn().mockResolvedValue(true),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
-        entries: [{ name: "Copilot", percentRemaining: 90 }],
+        entries: [{ accounting: TEST_ACCOUNTING, name: "Copilot", percentRemaining: 90 }],
         errors: [],
       }),
     };
@@ -614,7 +775,7 @@ describe("runCliShowCommand", () => {
       isAvailable: vi.fn().mockResolvedValue(true),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
-        entries: [{ name: "Synthetic", percentRemaining: 50 }],
+        entries: [{ accounting: TEST_ACCOUNTING, name: "Synthetic", percentRemaining: 50 }],
         errors: [],
       }),
     };
@@ -628,7 +789,12 @@ describe("runCliShowCommand", () => {
     );
 
     // Populate cache for both providers.
-    await runCliShowCommand({ argv: [], cwd: workspaceDir, stdout: { write: () => true } as any, stderr: { write: () => true } as any });
+    await runCliShowCommand({
+      argv: [],
+      cwd: workspaceDir,
+      stdout: { write: () => true } as any,
+      stderr: { write: () => true } as any,
+    });
 
     const jsonOut = createCaptureStream();
     const jsonCode = await runCliShowCommand({
@@ -693,5 +859,4 @@ describe("runCliShowCommand", () => {
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("--threshold requires --json");
   });
-
 });

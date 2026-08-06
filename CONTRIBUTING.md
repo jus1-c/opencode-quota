@@ -22,7 +22,7 @@ Thanks for contributing. This repo has strict local-only behavior and regression
 
 ## Development Setup
 
-- The published package runtime supports Node.js `>=20.0.0` (matches `package.json` engines).
+- The published package runtime supports Node.js `>=22.0.0` (matches `package.json` engines).
 - Repository development uses pnpm v11, which requires Node.js `>=22` for the pnpm CLI.
 - Enable the pinned package manager and install dependencies with:
 
@@ -32,27 +32,23 @@ corepack prepare pnpm@11.0.0 --activate
 pnpm install
 ```
 
-`pnpm install` runs `prepare`, which installs Husky hooks.
+`pnpm install` runs `prepare`, which installs Lefthook hooks.
 
 ## Local Quality Gates
 
-Pre-commit hooks currently run:
+The Lefthook pre-commit hook runs Biome only on staged supported files and re-stages formatting and safe fixes. It does not run typecheck or tests.
 
-- `pnpm exec lint-staged` (formats staged files via Prettier)
-- `pnpm run typecheck`
-- `pnpm test`
+The Lefthook pre-push hook runs exactly:
 
-Pre-push hooks currently run:
+- `pnpm verify`
 
-- `pnpm install --frozen-lockfile`
-
-Run checks manually before opening a PR:
+Run the canonical repository gate before opening a PR:
 
 ```sh
-pnpm run typecheck
-pnpm test
-pnpm run build
+pnpm verify
 ```
+
+It checks Biome linting and formatting, the pinned TypeScript toolchain, repository history/privacy, typecheck, build, the full test suite, focused four-surface parity, and package contents—in that order.
 
 Use `pnpm run test:watch` for local iteration. Use `pnpm run build:check` when you need the build plus package dry-run check.
 
@@ -60,12 +56,12 @@ Use `pnpm run test:watch` for local iteration. Use `pnpm run build:check` when y
 
 PR and `main` pushes trigger `.github/workflows/ci.yml` (`CI` workflow):
 
-- Job: `pnpm-quality` on Node `22.x`
-- Steps: `pnpm install --frozen-lockfile`, `pnpm run typecheck`, `pnpm run build`, `pnpm test`, then `pnpm pack --pack-destination` to upload the package tarball artifact
-- Job: `runtime-smoke` on Node `20.x` and `22.x`
-- Runtime smoke installs the packed package as a consumer with npm and verifies the default import, `./server` import, `./tui` export resolution with the packaged `dist/tui.tsx` payload, plus `engines.node >=20.0.0`
+- Job: `pnpm-quality` on Node `24.x`
+- Steps: frozen install, `pnpm verify`, then one exact npm artifact pack and upload
+- Job: `runtime-smoke` on Node `22.x` and `24.x`
+- Runtime smoke installs that exact packed artifact as a consumer and verifies the default/server imports, TUI export payload, CLI help, and `engines.node >=22.0.0`
 
-Release workflow `.github/workflows/publish-npm.yml` runs on release/manual dispatch and uses pnpm for version sync, install, typecheck, build, and test before publishing. It keeps `npm publish --access public` only for the npm registry publish step.
+Release workflow `.github/workflows/publish-npm.yml` first checks the release tag, SHA, and package version, then runs `pnpm verify` on Node 24. After that, it packs one exact artifact, smoke-tests that artifact on Node 22 and 24, verifies it again before provenance publishing, and backfills the release version. Run `pnpm run release:check` on Node 24 when the release environment is available; it adds the release-version assertion after the canonical gate.
 
 ## Branch Protection (Maintainers)
 
@@ -75,7 +71,7 @@ Recommended settings for `main`:
 - Require branches to be up to date before merging.
 - Require status checks from workflow `CI` for `pnpm-quality` and every `runtime-smoke` matrix entry.
 - Select checks exactly as GitHub displays them in repository settings.
-- Typical names look like `pnpm-quality`, `runtime-smoke (20.x)`, `runtime-smoke (22.x)` or `CI / ...` variants.
+- Typical names look like `pnpm-quality`, `runtime-smoke (22.x)`, `runtime-smoke (24.x)` or `CI / ...` variants.
 - Block direct pushes to `main` for non-admin users.
 
 ## Repo Guardrails
@@ -115,9 +111,7 @@ When adding a provider, keep the README setup wording tied to real behavior.
 ## Pull Request Checklist
 
 - Linked issue (`Fixes #...` or `Refs #...`) when available, or included a short no-issue rationale in the PR.
-- `pnpm run typecheck` passes.
-- `pnpm test` passes.
-- `pnpm run build` passes.
+- `pnpm verify` passes.
 - Verified behavior against the current production released OpenCode version, and included the tested version in the PR notes.
 - Updated docs when user-facing commands/config/workflow changed (usually `README.md`; update this file when contributor workflow changes).
 - For new API-key/token providers, started from `contributing/provider-template/` or explained why the template does not apply.

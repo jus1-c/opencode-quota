@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG } from "../src/lib/types.js";
 import {
   createAlibabaAuthModuleMock,
-  createConfigModuleMock,
   createPluginTestClient as createClient,
+  createConfigModuleMock,
   createPluginToolMockModule,
   createPluginTuiConfigInspection,
   createPricingModuleMock,
@@ -92,8 +92,8 @@ async function buildQuotaStatusDialogOutput(params: {
     resolveSessionMeta: async (sessionID) => {
       const response = await params.client.session.get({ path: { id: sessionID } });
       return {
-        modelID: response.data?.modelID,
-        providerID: response.data?.providerID,
+        modelID: response.data?.model?.id,
+        providerID: response.data?.model?.providerID,
       };
     },
   });
@@ -125,7 +125,11 @@ describe("/quota_status command behavior", () => {
     mocks.collectQuotaStatusLiveProbes.mockResolvedValue([
       {
         providerId: "openai",
-        result: { attempted: true, entries: [{ name: "OpenAI", percentRemaining: 90 }], errors: [] },
+        result: {
+          attempted: true,
+          entries: [{ name: "OpenAI", percentRemaining: 90 }],
+          errors: [],
+        },
       },
       {
         providerId: "synthetic",
@@ -148,7 +152,98 @@ describe("/quota_status command behavior", () => {
     else delete process.env.OPENCODE_CONFIG_DIR;
   });
 
-  it("probes every enabled and available provider with fresh single-window status probes and still throws the handled sentinel", async () => {
+  it("projects live probes to secret-free JSON summaries", async () => {
+    const secret = "status-secret-canary";
+    const { summarizeQuotaStatusLiveProbes } = await import("../src/lib/quota-dialog-commands.js");
+
+    const summaries = summarizeQuotaStatusLiveProbes([
+      {
+        providerId: "synthetic",
+        result: {
+          attempted: true,
+          entries: [{ name: secret, percentRemaining: 50 }],
+          errors: [{ label: "Synthetic", message: secret }],
+        },
+      },
+      {
+        providerId: "copilot",
+        result: { attempted: true, entries: [], errors: [] },
+      },
+    ]);
+
+    expect(summaries).toEqual([
+      { id: "synthetic", ok: false },
+      { id: "copilot", ok: true },
+    ]);
+    expect(JSON.stringify(summaries)).not.toContain(secret);
+  });
+
+  it("filters shared status data while keeping the /quota_status report builder authoritative", async () => {
+    const openai = {
+      id: "openai",
+      isAvailable: vi.fn().mockResolvedValue(true),
+      fetch: vi.fn(),
+    };
+    const synthetic = {
+      id: "synthetic",
+      isAvailable: vi.fn().mockResolvedValue(true),
+      fetch: vi.fn(),
+    };
+    mocks.getProviders.mockReturnValue([openai, synthetic]);
+    mocks.collectQuotaStatusLiveProbes.mockResolvedValueOnce([
+      {
+        providerId: "synthetic",
+        result: { attempted: true, entries: [], errors: [] },
+      },
+    ]);
+
+    const client = createClient({ modelID: "openai/gpt-5", providerID: "openai" });
+    const roots = {
+      workspaceRoot: process.cwd(),
+      configRoot: process.cwd(),
+      fallbackDirectory: process.cwd(),
+    };
+    const { resolveQuotaRuntimeContext } = await import("../src/lib/quota-runtime-context.js");
+    const runtime = await resolveQuotaRuntimeContext({
+      client,
+      roots,
+      includeSessionMeta: false,
+    });
+    const { buildStatusReportData } = await import("../src/lib/quota-dialog-commands.js");
+
+    const data = await buildStatusReportData({
+      runtime,
+      generatedAtMs: Date.parse("2026-07-23T00:00:00.000Z"),
+      providerFilterId: "synthetic",
+    });
+
+    expect(data.output).toBe("Injected quota status");
+    expect(data.payload?.providers).toEqual([
+      expect.objectContaining({ id: "synthetic", enabled: true, available: true }),
+    ]);
+    expect(data.payload?.liveProbes).toEqual([{ id: "synthetic", ok: true }]);
+    expect(data.hasComparableProviderData).toBe(false);
+    expect(openai.isAvailable).not.toHaveBeenCalled();
+    expect(synthetic.isAvailable).toHaveBeenCalledOnce();
+    expect(mocks.collectQuotaStatusLiveProbes).toHaveBeenCalledWith(
+      expect.objectContaining({ providers: [synthetic] }),
+    );
+    expect(mocks.buildQuotaStatusReport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerAvailability: [
+          expect.objectContaining({ id: "synthetic", enabled: true, available: true }),
+        ],
+        providerLiveProbes: [
+          {
+            providerId: "synthetic",
+            result: { attempted: true, entries: [], errors: [] },
+          },
+        ],
+      }),
+    );
+  });
+
+  it("passes every registered provider through the shared fetch-once status flow", async () => {
     const openai = {
       id: "openai",
       isAvailable: vi.fn().mockResolvedValue(true),
@@ -190,9 +285,10 @@ describe("/quota_status command behavior", () => {
     expect(mocks.collectQuotaStatusLiveProbes).toHaveBeenCalledWith(
       expect.objectContaining({
         client,
-        config: expect.objectContaining({ enabledProviders: ["openai", "synthetic", "copilot", "cursor"] }),
-        formatStyle: "singleWindow",
-        providers: [openai, synthetic, copilot],
+        config: expect.objectContaining({
+          enabledProviders: ["openai", "synthetic", "copilot", "cursor"],
+        }),
+        providers: [openai, synthetic, copilot, cursor],
       }),
     );
     expect(mocks.buildQuotaStatusReport).toHaveBeenCalledWith(
@@ -201,11 +297,15 @@ describe("/quota_status command behavior", () => {
         workspaceConfigPaths: [],
         settingSources: {},
         configIssues: [],
-        geminiCliClient: client,
+        googleModels: ["CLAUDE"],
         providerLiveProbes: [
           {
             providerId: "openai",
-            result: { attempted: true, entries: [{ name: "OpenAI", percentRemaining: 90 }], errors: [] },
+            result: {
+              attempted: true,
+              entries: [{ name: "OpenAI", percentRemaining: 90 }],
+              errors: [],
+            },
           },
           {
             providerId: "synthetic",

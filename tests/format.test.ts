@@ -66,7 +66,7 @@ describe("formatQuotaRows", () => {
     expect(barLine).not.toContain("81% left");
     expect(out).not.toContain("Quota (remaining)");
     expect(out).not.toContain("Quota (used)");
-    expect((barLine.match(/█/g) ?? [])).toHaveLength(2);
+    expect(barLine.match(/█/g) ?? []).toHaveLength(2);
   });
 
   it("renders over-quota percentages above 100 in used mode", () => {
@@ -86,7 +86,7 @@ describe("formatQuotaRows", () => {
     const lines = out.split("\n");
     const barLine = lines[1] ?? "";
     expect(barLine).toContain("125% used");
-    expect((barLine.match(/░/g) ?? [])).toHaveLength(0);
+    expect(barLine.match(/░/g) ?? []).toHaveLength(0);
   });
 
   it("floors over-quota remaining labels at 0% left", () => {
@@ -106,7 +106,7 @@ describe("formatQuotaRows", () => {
     const lines = out.split("\n");
     const barLine = lines[1] ?? "";
     expect(barLine).toContain("0% left");
-    expect((barLine.match(/█/g) ?? [])).toHaveLength(0);
+    expect(barLine.match(/█/g) ?? []).toHaveLength(0);
   });
 
   it("renders percent-row usage summaries in classic output when providers supply them", () => {
@@ -211,6 +211,159 @@ describe("formatQuotaRows", () => {
     expect(out).not.toContain("0h 14m");
   });
 
+  it("renders fractional reset countdowns when resetTimeDecimals is set (single-window)", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-15T10:00:00.000Z"));
+
+    const out = formatQuotaRows({
+      version: "1.0.0",
+      layout: { maxWidth: 50, narrowAt: 42, tinyAt: 32 },
+      resetTimeDecimals: 1,
+      entries: [
+        {
+          name: "Copilot Monthly",
+          percentRemaining: 50,
+          resetTimeIso: "2026-01-21T02:48:00.000Z",
+        },
+        {
+          name: "OpenAI 5h",
+          percentRemaining: 50,
+          resetTimeIso: "2026-01-15T11:24:00.000Z",
+        },
+      ],
+    });
+
+    expect(out).toContain("5.7d");
+    expect(out).toContain("1.4h");
+    expect(out).not.toContain("0.5h");
+  });
+
+  it("renders fractional reset countdowns when resetTimeDecimals is set (grouped)", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-15T10:00:00.000Z"));
+
+    const out = formatQuotaRows({
+      version: "1.0.0",
+      style: "allWindows",
+      layout: { maxWidth: 50, narrowAt: 42, tinyAt: 32 },
+      resetTimeDecimals: 1,
+      entries: [
+        {
+          name: "OpenAI 5h",
+          group: "OpenAI",
+          label: "5h:",
+          percentRemaining: 56,
+          resetTimeIso: "2026-01-15T10:14:00.000Z",
+        },
+      ],
+    });
+
+    expect(out).toContain("0.2h");
+    expect(out).not.toContain("0.5h");
+  });
+
+  it("uses minutes instead of textual zero for configured sub-hour boundaries", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-15T10:00:00.000Z"));
+
+    const decimalsZero = formatQuotaRows({
+      version: "1.0.0",
+      resetTimeDecimals: 0,
+      entries: [
+        {
+          name: "Short reset",
+          percentRemaining: 50,
+          resetTimeIso: "2026-01-15T10:14:00.000Z",
+        },
+      ],
+    });
+    const decimalsOne = formatQuotaRows({
+      version: "1.0.0",
+      resetTimeDecimals: 1,
+      entries: [
+        {
+          name: "Very short reset",
+          percentRemaining: 50,
+          resetTimeIso: "2026-01-15T10:02:00.000Z",
+        },
+      ],
+    });
+
+    expect(decimalsZero).toContain("14m");
+    expect(decimalsZero).not.toContain("0h");
+    expect(decimalsOne).toContain("2m");
+    expect(decimalsOne).not.toContain("0.0h");
+  });
+
+  it("preserves the leading reset value at decimals 4 in tiny layouts", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-15T10:00:00.000Z"));
+    const resetTimeIso = "2026-01-15T11:24:00.000Z";
+    const layout = { maxWidth: 32, narrowAt: 42, tinyAt: 32 };
+
+    const outputs = [
+      formatQuotaRows({
+        version: "1.0.0",
+        layout,
+        resetTimeDecimals: 4,
+        entries: [{ name: "Quota", percentRemaining: 50, resetTimeIso }],
+      }),
+      formatQuotaRows({
+        version: "1.0.0",
+        layout,
+        resetTimeDecimals: 4,
+        entries: [{ kind: "value", name: "Balance", value: "$1", resetTimeIso }],
+      }),
+      formatQuotaRows({
+        version: "1.0.0",
+        style: "allWindows",
+        layout,
+        resetTimeDecimals: 4,
+        entries: [{ name: "Quota", group: "Provider", percentRemaining: 50, resetTimeIso }],
+      }),
+      formatQuotaRows({
+        version: "1.0.0",
+        style: "allWindows",
+        layout,
+        resetTimeDecimals: 4,
+        entries: [
+          {
+            kind: "value",
+            name: "Balance",
+            group: "Provider",
+            value: "$1",
+            resetTimeIso,
+          },
+        ],
+      }),
+    ];
+
+    for (const output of outputs) {
+      expect(output).toContain("1.4000h");
+      expect(output).not.toMatch(/(?:^|\s)\.4000h/u);
+    }
+  });
+
+  it("keeps the default compact rounding when resetTimeDecimals is unset", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-15T10:00:00.000Z"));
+
+    const out = formatQuotaRows({
+      version: "1.0.0",
+      layout: { maxWidth: 50, narrowAt: 42, tinyAt: 32 },
+      entries: [
+        {
+          name: "Copilot Monthly",
+          percentRemaining: 50,
+          resetTimeIso: "2026-01-21T02:48:00.000Z",
+        },
+      ],
+    });
+
+    expect(out).toContain("5d");
+    expect(out).not.toContain("5.7d");
+  });
+
   it("normalizes grouped headers in all-window toast output", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-15T12:00:00.000Z"));
@@ -267,7 +420,12 @@ describe("formatQuotaRows", () => {
       layout: { maxWidth: 80, narrowAt: 42, tinyAt: 32 },
       entries: [
         { name: "Copilot", group: "Copilot", label: "Quota:", percentRemaining: 75 },
-        { name: "Synthetic Requests", group: "Synthetic", label: "Requests:", percentRemaining: 50 },
+        {
+          name: "Synthetic Requests",
+          group: "Synthetic",
+          label: "Requests:",
+          percentRemaining: 50,
+        },
         { name: "Cursor API", group: "Cursor", label: "API:", percentRemaining: 25 },
       ],
     });
@@ -275,6 +433,26 @@ describe("formatQuotaRows", () => {
     expect(out).toContain("\nQuota ");
     expect(out).toContain("\nRequests ");
     expect(out).toContain("\nAPI ");
+    expect(out).not.toContain("Quota window");
+  });
+
+  it("uses metricLabel for grouped percent rows without a visible compact label", () => {
+    const out = formatQuotaRows({
+      version: "1.0.0",
+      style: "allWindows",
+      layout: { maxWidth: 80, narrowAt: 42, tinyAt: 32 },
+      entries: [
+        {
+          name: "Antigravity (ali…)",
+          group: "[Antigravity (ali…)]",
+          metricLabel: "Quota",
+          percentRemaining: 75,
+        },
+      ],
+    });
+
+    expect(out).toContain("[Antigravity (ali…)]");
+    expect(out).toContain("\nQuota ");
     expect(out).not.toContain("Quota window");
   });
 
@@ -431,9 +609,9 @@ describe("formatQuotaRows", () => {
       ],
     });
 
-    expect(out.indexOf("5h window")).toBeGreaterThanOrEqual(0);
-    expect(out.indexOf("Weekly window")).toBeGreaterThanOrEqual(0);
-    expect(out.indexOf("5h window")).toBeLessThan(out.indexOf("Weekly window"));
+    expect(out.indexOf("Five-hour")).toBeGreaterThanOrEqual(0);
+    expect(out.indexOf("Weekly")).toBeGreaterThanOrEqual(0);
+    expect(out.indexOf("Five-hour")).toBeLessThan(out.indexOf("Weekly"));
   });
 
   it("renders all-window percent rows as used when percentDisplayMode is used", () => {
@@ -453,14 +631,12 @@ describe("formatQuotaRows", () => {
       ],
     });
 
-    const barLine = out
-      .split("\n")
-      .find((line) => line.includes("%"));
+    const barLine = out.split("\n").find((line) => line.includes("%"));
     expect(barLine).toContain("19% used");
     expect(barLine).not.toContain("81% left");
     expect(out).not.toContain("Quota (remaining)");
     expect(out).not.toContain("Quota (used)");
-    expect((barLine?.match(/█/g) ?? [])).toHaveLength(2);
+    expect(barLine?.match(/█/g) ?? []).toHaveLength(2);
   });
 
   it("renders all-window percent-row usage summaries when providers supply them", () => {
@@ -479,7 +655,7 @@ describe("formatQuotaRows", () => {
       ],
     });
 
-    expect(out).toContain("5h window");
+    expect(out).toContain("Five-hour");
     expect(out).not.toContain("0/135");
     expect(out).toContain("100% left");
   });
@@ -521,8 +697,8 @@ describe("formatQuotaRows", () => {
     expect(out.indexOf("[OpenAI] (Pro)")).toBeGreaterThanOrEqual(0);
     expect(out.indexOf("[Qwen] (free)")).toBeLessThan(out.indexOf("[OpenAI] (Pro)"));
 
-    expect(out.indexOf("RPM window")).toBeLessThan(out.indexOf("Daily window"));
-    expect(out.indexOf("5h window")).toBeLessThan(out.indexOf("Weekly window"));
+    expect(out.indexOf("RPM")).toBeLessThan(out.indexOf("Daily"));
+    expect(out.indexOf("Five-hour")).toBeLessThan(out.indexOf("Weekly"));
   });
 
   it("preserves explicit legacy Google-style labels and only falls back for unlabeled rows", () => {
@@ -548,9 +724,9 @@ describe("formatQuotaRows", () => {
       ],
     });
 
-    expect(out).toContain("[Google Antigravity] (acct)");
+    expect(out).toContain("[Antigravity (acct)]");
     expect(out).toContain("\nClaude ");
-    expect(out).toContain("\nGoogle Antigravity (acct)");
+    expect(out.match(/\[Antigravity \(acct\)\]/gu)).toHaveLength(2);
     expect(out).not.toContain("[Claude] (acct)");
     expect(out).not.toContain("[G3Pro] (acct)");
   });
@@ -595,10 +771,7 @@ describe("formatQuotaRows", () => {
       },
     });
 
-    expect(out.split("\n")).toEqual([
-      SESSION_TOKEN_SECTION_HEADING,
-      "  372 (120) in  41 out",
-    ]);
+    expect(out.split("\n")).toEqual([SESSION_TOKEN_SECTION_HEADING, "  372 (120) in  41 out"]);
   });
 
   it("renders all-window session tokens with detailed per-model rows", () => {

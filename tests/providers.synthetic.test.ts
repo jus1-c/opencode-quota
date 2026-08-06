@@ -1,15 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
-
+import { syntheticProvider } from "../src/providers/synthetic.js";
 import {
   expectAttemptedWithErrorLabel,
   expectAttemptedWithNoErrors,
   expectNotAttempted,
+  visibleEntries,
 } from "./helpers/provider-assertions.js";
-import { syntheticProvider } from "../src/providers/synthetic.js";
 
 vi.mock("../src/lib/synthetic.js", () => ({
   querySyntheticQuota: vi.fn(),
   hasSyntheticApiKeyConfigured: vi.fn(),
+  getSyntheticKeyDiagnostics: vi.fn(async () => ({
+    configured: false,
+    source: null,
+    checkedPaths: [],
+  })),
 }));
 
 vi.mock("../src/lib/provider-availability.js", () => ({
@@ -47,7 +52,7 @@ describe("synthetic provider", () => {
 
     const out = await syntheticProvider.fetch({} as any);
     expectAttemptedWithNoErrors(out);
-    expect(out.entries).toEqual([
+    expect(visibleEntries(out.entries, "synthetic")).toEqual([
       {
         name: "Synthetic 5h",
         group: "Synthetic",
@@ -92,7 +97,7 @@ describe("synthetic provider", () => {
 
     const out = await syntheticProvider.fetch({} as any);
     expectAttemptedWithNoErrors(out);
-    expect(out.entries).toEqual([
+    expect(visibleEntries(out.entries, "synthetic")).toEqual([
       {
         name: "Synthetic 5h",
         group: "Synthetic",

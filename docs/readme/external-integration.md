@@ -1,109 +1,236 @@
-# External integration
-
 [← Back to README](../../README.md)
 
-Use this when another tool needs quota data: shell scripts, tmux, Starship, CI, status bars, or routers.
+# Use quota data in other tools
 
-There are two ways to get the same JSON data:
+OpenCode Quota can share its cached quota data with scripts, status bars, CI, and monitoring tools. These options do not make extra provider requests.
 
-| Use this | When you want |
+## Choose one option
+
+| What you need | Use |
 | --- | --- |
-| `opencode-quota show --json` | A command that prints quota JSON now |
-| Export file | A file other tools can read repeatedly without running a command every time |
+| Run a command and get JSON | `opencode-quota show --json` |
+| Read the same JSON often | Export file |
+| Send numbers to a monitoring system | OpenTelemetry metrics |
 
-Both use the local provider cache. They do **not** make extra provider network requests.
+## 1. Get JSON from a command
 
-## Option 1: print JSON now
+Use this for scripts and CI:
 
 ```bash
 opencode-quota show --json
 ```
 
-Common variants:
+Useful variations:
 
 ```bash
-# One provider only
+# Only Copilot
 opencode-quota show --json --provider copilot
 
-# Fail if comparable cached quota is below 5%
+# Exit with an error when comparable quota is below 5%
 opencode-quota show --json --threshold 5
 ```
 
-Threshold exits:
+Threshold exit codes:
 
-| Exit | Meaning |
+| Code | Meaning |
 | --- | --- |
 | `0` | Quota is available and above the threshold |
-| `1` | At least one comparable cached provider is below the threshold |
-| `2` | No cached percentage was available to compare |
+| `1` | At least one comparable cached percentage is below the threshold |
+| `2` | Results were incomplete or no comparable percentage was found |
 
-## Option 2: write an export file
+### CI example
 
-Use this when a status bar or background tool reads quota often.
+```bash
+npx @slkiser/opencode-quota show --json --threshold 5
+```
+
+### Read Copilot's percentage with `jq`
+
+Some Copilot results contain values instead of percentages. Select a percentage row instead of assuming the first row is one:
+
+```bash
+opencode-quota show --json --provider copilot \
+  | jq -r '(.providers.copilot.entries? // []) | map(select(.renderType == "percent" and .percentRemaining != null)) | first | .percentRemaining // empty'
+```
+
+## 2. Read an export file
+
+Use this for a status bar or another tool that checks quota often.
 
 Add this to `opencode-quota/quota-toast.json`:
 
 ```jsonc
 {
   "export": {
-    "enabled": true
-  }
+    "enabled": true,
+  },
 }
 ```
 
-Default output path:
-
-```text
-$XDG_CACHE_HOME/opencode/quota-export.json
-```
-
-Usually that means:
+The file is normally written here:
 
 ```text
 ~/.cache/opencode/quota-export.json
 ```
 
-The TUI updates this file after each home-bottom background refresh, about every 60 seconds. Write errors are logged as warnings and never break TUI rendering.
+If you set `XDG_CACHE_HOME`, the file is written to `$XDG_CACHE_HOME/opencode/quota-export.json` instead.
 
-## Copy-paste examples
+The TUI refreshes the file about once a minute. A write error is logged, but it does not break the TUI.
 
-### CI: stop when quota is low
+### tmux example
 
-```bash
-npx @slkiser/opencode-quota show --json --threshold 5
-```
-
-### Shell: branch on Copilot quota
-
-```bash
-PCT=$(opencode-quota show --json | jq '.providers["copilot"].entries[0].percentRemaining')
-(( ${PCT%.*} < 10 )) && echo "Low quota, skipping." && exit 0
-```
-
-### tmux: read the export file
+Add this to your tmux config:
 
 ```bash
 set -g status-interval 30
-set -g status-right '#(jq -r "[.providers|to_entries[]|select(.value.status==\"ok\")|(.value.entries[0].percentRemaining|floor|tostring)+\"%\"]|join(\" · \")" ~/.cache/opencode/quota-export.json 2>/dev/null)'
+set -g status-right '#(jq -r "[.providers|to_entries[]|select(.value.status==\"ok\")|first(.value.entries[]?|select(.renderType==\"percent\" and .percentRemaining!=null))|(.percentRemaining|floor|tostring)+\"%\"]|join(\" | \")" ~/.cache/opencode/quota-export.json 2>/dev/null)'
 ```
 
-### Starship: run the JSON command
+### Starship example
+
+Add this to `starship.toml`:
 
 ```toml
 [custom.quota]
-command = "opencode-quota show --json 2>/dev/null | jq -r '[.providers|to_entries[]|select(.value.status==\"ok\")|(.value.entries[0].percentRemaining|floor|tostring)+\"%\"]|join(\" \")'"
+command = "opencode-quota show --json 2>/dev/null | jq -r '[.providers|to_entries[]|select(.value.status==\"ok\")|first(.value.entries[]?|select(.renderType==\"percent\" and .percentRemaining!=null))|(.percentRemaining|floor|tostring)+\"%\"]|join(\" \")'"
 when = "true"
 interval = 60
 ```
 
-<details>
-<summary><strong>JSON shape</strong></summary>
+## 3. Send OpenTelemetry metrics
 
-Both `show --json` and the export file use this structure:
+Use this only when your OpenCode host already has an OpenTelemetry metrics provider and exporter. OpenCode Quota does not create or configure them.
+
+Add this to `opencode-quota/quota-toast.json`:
 
 ```jsonc
 {
-  "version": 1,
+  "telemetry": {
+    "enabled": true,
+  },
+}
+```
+
+OpenCode Quota then publishes two gauges:
+
+| Metric | Meaning |
+| --- | --- |
+| `opencode.quota.consumed` | Used quota from `0` to `1` |
+| `opencode.quota.cache.age` | Age of cached data in seconds |
+
+If the host has no global metrics provider, nothing is sent and OpenCode Quota continues normally.
+
+<details>
+<summary><strong>Metric fields and privacy</strong></summary>
+
+`opencode.quota.consumed` uses percentage rows only. Its value is `(100 - percentRemaining) / 100`, limited to the range `0` to `1`. Value rows such as balances are not converted into this metric.
+
+| Metric | Labels |
+| --- | --- |
+| `opencode.quota.consumed` | `quota.provider`, `quota.result_type`, `quota.window` |
+| `opencode.quota.cache.age` | `quota.provider` |
+
+Label values stay limited:
+
+- `quota.provider` is a maintained provider ID, `custom`, or `other`.
+- `quota.result_type` is `quota`, `rate_limit`, `usage`, `spend`, `budget`, `balance`, or `status`.
+- `quota.window` is `rpm`, `five_hour`, `hour`, `day`, `week`, `month`, `year`, `mcp`, `code_review`, or `unknown`.
+
+When several rows map to the same safe labels, OpenCode Quota reports the highest consumed ratio or oldest cache age. Display names, account IDs, configured source IDs, credentials, URLs, paths, errors, and raw responses are never labels.
+
+</details>
+
+<details>
+<summary><strong>Minimal host setup example</strong></summary>
+
+Register the provider before OpenCode loads OpenCode Quota. Replace the console exporter with your real exporter.
+
+```javascript
+import { metrics } from "@opentelemetry/api";
+import {
+  ConsoleMetricExporter,
+  MeterProvider,
+  PeriodicExportingMetricReader,
+} from "@opentelemetry/sdk-metrics";
+
+const reader = new PeriodicExportingMetricReader({
+  exporter: new ConsoleMetricExporter(),
+  exportIntervalMillis: 60_000,
+});
+const provider = new MeterProvider({ readers: [reader] });
+metrics.setGlobalMeterProvider(provider);
+
+export async function shutdownMetrics() {
+  await provider.shutdown();
+}
+```
+
+</details>
+
+## JSON basics
+
+The command and export file both use JSON schema version `2`.
+
+Every provider has `status`. Other fields depend on that status:
+
+- `ok`: `fetchedAt` and `entries`
+- `partial`: `fetchedAt`, `entries`, and `errors`
+- `error`: `fetchedAt` and a safe `error` message
+- `unavailable`: no other fields are required
+
+Provider statuses:
+
+| Status | Meaning |
+| --- | --- |
+| `ok` | Data is available |
+| `partial` | Some data worked and some failed |
+| `error` | The provider failed |
+| `unavailable` | No matching cached data exists |
+
+A percentage entry uses `renderType: "percent"` and `percentRemaining`. A value entry uses `renderType: "value"` and `value`.
+
+Optional entry fields include `window`, `resetAt`, `observedAt`, and `sourceId`. A provider can also include `rawDetails`: sanitized provider-owned key/value facts that stay out of normal quota displays.
+
+Configured `quotaProviders` entries include `sourceId`. The `quota-providers` result includes a `sources` list so tools can match each result to its configured source. Treat `status: "partial"` as incomplete.
+
+`rawDetails` is curated and safe to export. Secrets, credentials, URLs, checked paths, and raw provider responses remain excluded from public JSON. Use `/quota_status` when you need live diagnostics.
+
+<details>
+<summary><strong>Configured source details</strong></summary>
+
+Rows from a configured `quotaProviders` definition appear under `providers["quota-providers"]` and keep their stable `sourceId`:
+
+```json
+{
+  "sourceId": "openrouter-primary",
+  "renderType": "percent",
+  "percentRemaining": 40
+}
+```
+
+The provider also includes a summary for every configured source:
+
+```json
+"sources": [
+  {
+    "id": "openrouter-primary",
+    "providerId": "openrouter",
+    "status": "ok",
+    "entryCount": 1
+  }
+]
+```
+
+Each summary is exactly `id`, effective `providerId`, coarse `status`, and `entryCount`. A source can be `ok` after producing valid rows while failed mapping candidates can still make the aggregate provider `partial`.
+
+</details>
+
+<details>
+<summary><strong>Small JSON example</strong></summary>
+
+```json
+{
+  "version": 2,
   "exportedAt": 1748736000,
   "fromCache": true,
   "cacheAgeSeconds": 42,
@@ -114,70 +241,25 @@ Both `show --json` and the export file use this structure:
       "entries": [
         {
           "name": "Premium Requests",
-          "window": "Monthly",
-          "percentRemaining": 62.3,
-          "resetAt": 1748908800,
-          "unlimited": false
+          "resultType": "quota",
+          "acquisitionMethod": "remote_api",
+          "ownership": "maintained",
+          "authority": "provider_reported",
+          "renderType": "percent",
+          "percentRemaining": 62.3
         }
       ]
-    },
-    "opencode-go": {
-      "status": "error",
-      "fetchedAt": 1748735958,
-      "error": "Request timeout after 5000ms"
-    },
-    "anthropic": {
-      "status": "unavailable"
     }
   }
 }
 ```
 
-Provider statuses:
-
-| Value | Meaning |
-| --- | --- |
-| `ok` | Cached fetch succeeded; `entries` is populated |
-| `error` | Cached fetch failed; `error` has the message |
-| `unavailable` | No cached quota is available |
-
-Optional fields:
-
-- `window` appears only when the provider reports a reset window.
-- `percentRemaining` is absent for value-only rows.
-- `resetAt` is absent when the provider does not report a reset time.
-
 </details>
 
-<details>
-<summary><strong>More integration ideas</strong></summary>
+## Important behavior
 
-### File watcher: refresh only when the export changes
-
-```bash
-# macOS
-fswatch -o ~/.cache/opencode/quota-export.json | xargs -I{} my-status-refresh
-
-# Linux
-inotifywait -m -e close_write ~/.cache/opencode/quota-export.json \
-  | while read; do my-status-refresh; done
-```
-
-### Router: pick the provider with the most headroom
-
-```python
-import json, subprocess
-
-data = json.loads(subprocess.check_output(
-    ["opencode-quota", "show", "--json"], timeout=1
-))
-best = max(
-    (k for k, v in data["providers"].items() if v["status"] == "ok"),
-    key=lambda k: next(
-        (e.get("percentRemaining", 0) for e in data["providers"][k]["entries"]), 0
-    ),
-    default=None,
-)
-```
-
-</details>
+- All options use data collected during normal OpenCode Quota activity.
+- The command and export file read cached data instead of contacting providers.
+- The OpenTelemetry integration reads in-memory results and never starts its own refresh loop.
+- OpenTelemetry metric labels are limited to safe provider, result type, and quota-window values.
+- Display names, account IDs, source IDs, credentials, paths, URLs, errors, and raw responses are never metric labels.

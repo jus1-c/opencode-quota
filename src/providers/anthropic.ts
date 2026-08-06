@@ -4,18 +4,26 @@
  * Normalizes Claude CLI-exposed quota windows into generic toast entries.
  */
 
+import {
+  getAnthropicDiagnostics,
+  hasAnthropicCredentialsConfigured,
+  queryAnthropicQuota,
+} from "../lib/anthropic.js";
+import { sanitizeDisplayText } from "../lib/display-sanitize.js";
 import type {
   QuotaProvider,
   QuotaProviderContext,
   QuotaProviderResult,
   QuotaToastEntry,
 } from "../lib/entries.js";
-import {
-  hasAnthropicCredentialsConfigured,
-  queryAnthropicQuota,
-} from "../lib/anthropic.js";
 import { isCanonicalProviderAvailable } from "../lib/provider-availability.js";
-import { attemptedErrorResult, attemptedResult, notAttemptedResult } from "./result-helpers.js";
+import {
+  attemptedErrorResult,
+  attemptedResult,
+  notAttemptedResult,
+  statusDetailsFromRecord,
+  withStatusDetails,
+} from "./result-helpers.js";
 
 export function getAnthropicNoDataMessage(): string {
   return "Quota unavailable via local Claude CLI or Claude OAuth fallback";
@@ -44,21 +52,53 @@ export const anthropicProvider: QuotaProvider = {
   },
 
   async fetch(ctx: QuotaProviderContext): Promise<QuotaProviderResult> {
-    const result = await queryAnthropicQuota({
+    const options = {
       binaryPath: ctx.config?.anthropicBinaryPath,
       requestTimeoutMs: ctx.config?.requestTimeoutMs,
-    });
+    };
+    let statusDetails;
+    try {
+      const diagnostics = await getAnthropicDiagnostics(options);
+      const quota = diagnostics.quotaSupported ? diagnostics.quota : undefined;
+      statusDetails = statusDetailsFromRecord({
+        cli_installed: diagnostics.installed ? "true" : "false",
+        cli_version: diagnostics.version ?? "(none)",
+        auth_status: diagnostics.authStatus,
+        quota_supported: diagnostics.quotaSupported ? "true" : "false",
+        quota_source: diagnostics.quotaSource === "none" ? "(none)" : diagnostics.quotaSource,
+        checked_commands: diagnostics.checkedCommands.join(" | ") || "(none)",
+        message: diagnostics.message,
+        five_hour_remaining: quota
+          ? `${quota.five_hour.percentRemaining}% reset_at=${quota.five_hour.resetTimeIso ?? "(none)"}`
+          : undefined,
+        seven_day_remaining: quota
+          ? `${quota.seven_day.percentRemaining}% reset_at=${quota.seven_day.resetTimeIso ?? "(none)"}`
+          : undefined,
+      });
+    } catch (error) {
+      statusDetails = statusDetailsFromRecord({
+        cli_installed: "false",
+        message: `failed to probe Claude CLI: ${sanitizeDisplayText(error instanceof Error ? error.message : String(error))}`,
+      });
+    }
 
+    const result = await queryAnthropicQuota(options);
     if (!result) {
-      return notAttemptedResult();
+      return withStatusDetails(notAttemptedResult(), statusDetails);
     }
 
     if (!result.success) {
-      return attemptedErrorResult("Claude", result.error);
+      return withStatusDetails(attemptedErrorResult("Claude", result.error), statusDetails);
     }
 
     const entries: QuotaToastEntry[] = [
       {
+        accounting: {
+          resultType: "quota",
+          acquisitionMethod: "local_cli",
+          ownership: "maintained",
+          authority: "provider_reported",
+        },
         name: "Claude 5h",
         group: "Claude",
         label: "5h:",
@@ -66,6 +106,12 @@ export const anthropicProvider: QuotaProvider = {
         resetTimeIso: result.five_hour.resetTimeIso,
       },
       {
+        accounting: {
+          resultType: "quota",
+          acquisitionMethod: "local_cli",
+          ownership: "maintained",
+          authority: "provider_reported",
+        },
         name: "Claude Weekly",
         group: "Claude",
         label: "Weekly:",
@@ -74,6 +120,6 @@ export const anthropicProvider: QuotaProvider = {
       },
     ];
 
-    return attemptedResult(entries);
+    return withStatusDetails(attemptedResult(entries), statusDetails);
   },
 };

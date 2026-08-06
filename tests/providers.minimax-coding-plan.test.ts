@@ -1,22 +1,48 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
 import {
   expectAttemptedWithErrorLabel,
   expectAttemptedWithNoErrors,
   expectNotAttempted,
+  visibleEntries,
 } from "./helpers/provider-assertions.js";
 
-const mocks = vi.hoisted(() => ({
-  fetchWithTimeout: vi.fn(),
-  isAnyProviderIdAvailable: vi.fn(),
-  isCanonicalProviderAvailable: vi.fn(),
-  resolveMiniMaxAuthCached: vi.fn(),
-  resolveMiniMaxChinaAuthCached: vi.fn(),
-}));
+const mocks = vi.hoisted(() => {
+  const fetchResponse = vi.fn();
+  return {
+    fetchResponse,
+    fetchWithTimeout: vi.fn(
+      async (
+        _url: string,
+        options: {
+          consume: (response: Response, signal: AbortSignal) => Promise<unknown> | unknown;
+        },
+      ) => {
+        const response = await fetchResponse();
+        return await options.consume(response, new AbortController().signal);
+      },
+    ),
+    isAnyProviderIdAvailable: vi.fn(),
+    isCanonicalProviderAvailable: vi.fn(),
+    resolveMiniMaxAuthCached: vi.fn(),
+    resolveMiniMaxChinaAuthCached: vi.fn(),
+  };
+});
 
 vi.mock("../src/lib/minimax-auth.js", () => ({
   resolveMiniMaxAuthCached: mocks.resolveMiniMaxAuthCached,
   resolveMiniMaxChinaAuthCached: mocks.resolveMiniMaxChinaAuthCached,
+  getMiniMaxAuthDiagnostics: vi.fn(async () => ({
+    state: "none",
+    source: null,
+    checkedPaths: [],
+    authPaths: [],
+  })),
+  getMiniMaxChinaAuthDiagnostics: vi.fn(async () => ({
+    state: "none",
+    source: null,
+    checkedPaths: [],
+    authPaths: [],
+  })),
   DEFAULT_MINIMAX_AUTH_CACHE_MAX_AGE_MS: 5_000,
 }));
 
@@ -44,6 +70,8 @@ function createCodingPlanModel(
     current_weekly_total_count: number;
     current_weekly_usage_count: number;
     weekly_remains_time: number;
+    current_interval_remaining_percent: unknown;
+    current_weekly_remaining_percent: unknown;
   }> = {},
 ) {
   return {
@@ -70,16 +98,23 @@ function mockMiniMaxAuthInvalid(error = "Invalid API key") {
   mocks.resolveMiniMaxAuthCached.mockResolvedValueOnce({ state: "invalid", error });
 }
 
-function mockMiniMaxAuthConfigured(apiKey = "test-key", endpoint: "international" | "china" = "international") {
+function mockMiniMaxAuthConfigured(
+  apiKey = "test-key",
+  endpoint: "international" | "china" = "international",
+) {
   mocks.resolveMiniMaxAuthCached.mockResolvedValueOnce({ state: "configured", apiKey, endpoint });
 }
 
 function mockMiniMaxChinaAuthConfigured(apiKey = "china-key") {
-  mocks.resolveMiniMaxChinaAuthCached.mockResolvedValueOnce({ state: "configured", apiKey, endpoint: "china" });
+  mocks.resolveMiniMaxChinaAuthCached.mockResolvedValueOnce({
+    state: "configured",
+    apiKey,
+    endpoint: "china",
+  });
 }
 
 function mockMiniMaxHttpSuccess(models: unknown[]) {
-  mocks.fetchWithTimeout.mockResolvedValueOnce({
+  mocks.fetchResponse.mockResolvedValueOnce({
     ok: true,
     json: async () => ({
       model_remains: models,
@@ -89,7 +124,7 @@ function mockMiniMaxHttpSuccess(models: unknown[]) {
 }
 
 function mockMiniMaxHttpFailure(status: number, text: string) {
-  mocks.fetchWithTimeout.mockResolvedValueOnce({
+  mocks.fetchResponse.mockResolvedValueOnce({
     ok: false,
     status,
     text: async () => text,
@@ -133,7 +168,6 @@ describe("minimax-coding-plan provider", () => {
     expectAttemptedWithNoErrors(out);
     expect(out.entries).toHaveLength(2);
     expect(out.entries[0]).toMatchObject({
-      window: "five_hour",
       name: "MiniMax Coding Plan 5h",
       group: "MiniMax Coding Plan",
       label: "5h:",
@@ -141,13 +175,35 @@ describe("minimax-coding-plan provider", () => {
       percentRemaining: 98,
     });
     expect(out.entries[1]).toMatchObject({
-      window: "weekly",
       name: "MiniMax Coding Plan Weekly",
       group: "MiniMax Coding Plan",
       label: "Weekly:",
       right: "105/45000",
       percentRemaining: 100,
     });
+    expect(out.entries.every((entry) => !("window" in entry))).toBe(true);
+    expect(out.statusDetails).toEqual(
+      expect.arrayContaining([
+        {
+          key: "five_hour_usage",
+          value: expect.stringMatching(/^70\/4500 percent_remaining=98 reset_at=/u),
+        },
+        {
+          key: "weekly_usage",
+          value: expect.stringMatching(/^105\/45000 percent_remaining=100 reset_at=/u),
+        },
+      ]),
+    );
+  });
+
+  it("keeps window discrimination on internal query entries", async () => {
+    mockMiniMaxHttpSuccess([createCodingPlanModel({ model_name: "MiniMax-M2.7" })]);
+
+    const out = await queryMiniMaxQuota("intl-key");
+
+    expect(out.success).toBe(true);
+    if (!out.success) throw new Error("Expected successful MiniMax query");
+    expect(out.entries.map((entry) => entry.window)).toEqual(["five_hour", "weekly"]);
   });
 
   it("uses the China Token Plan endpoint for the MiniMax China provider", async () => {
@@ -160,10 +216,13 @@ describe("minimax-coding-plan provider", () => {
     expect(mocks.fetchWithTimeout).toHaveBeenCalledWith(
       "https://api.minimaxi.com/v1/token_plan/remains",
       expect.objectContaining({
-        method: "GET",
-        headers: expect.objectContaining({ Authorization: "Bearer china-key" }),
+        request: expect.objectContaining({
+          method: "GET",
+          headers: expect.objectContaining({ Authorization: "Bearer china-key" }),
+        }),
+        timeoutMs: undefined,
+        consume: expect.any(Function),
       }),
-      undefined,
     );
   });
 
@@ -185,12 +244,23 @@ describe("minimax-coding-plan provider", () => {
     expectAttemptedWithNoErrors(out);
     expect(out.entries).toHaveLength(1);
     expect(out.entries[0]).toMatchObject({
-      window: "five_hour",
       name: "MiniMax Coding Plan (CN) 5h",
       group: "MiniMax Coding Plan (CN)",
       right: "1200/1500",
       percentRemaining: 20,
     });
+    expect(out.entries[0]).not.toHaveProperty("window");
+    expect(out.statusDetails).toEqual(
+      expect.arrayContaining([
+        {
+          key: "five_hour_usage",
+          value: expect.stringMatching(/^1200\/1500 percent_remaining=20 reset_at=/u),
+        },
+      ]),
+    );
+    expect(out.statusDetails).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ key: "weekly_usage" })]),
+    );
   });
 
   it.each([
@@ -198,32 +268,33 @@ describe("minimax-coding-plan provider", () => {
     { rawUsed: 1500, right: "1500/1500", percentRemaining: 0 },
     { rawUsed: 13, total: 15000, right: "13/15000", percentRemaining: 100 },
     { rawUsed: 1550, right: "1550/1500", percentRemaining: -3 },
-  ])(
-    "normalizes China Token Plan used count $rawUsed as $right",
-    async ({ rawUsed, total = 1500, right, percentRemaining }) => {
-      mockMiniMaxChinaAuthConfigured("china-key");
-      mockMiniMaxHttpSuccess([
-        createCodingPlanModel({
-          model_name: "MiniMax-M2.7",
-          current_interval_total_count: total,
-          current_interval_usage_count: rawUsed,
-          current_weekly_total_count: undefined,
-          current_weekly_usage_count: undefined,
-          weekly_remains_time: undefined,
-        }),
-      ]);
+  ])("normalizes China Token Plan used count $rawUsed as $right", async ({
+    rawUsed,
+    total = 1500,
+    right,
+    percentRemaining,
+  }) => {
+    mockMiniMaxChinaAuthConfigured("china-key");
+    mockMiniMaxHttpSuccess([
+      createCodingPlanModel({
+        model_name: "MiniMax-M2.7",
+        current_interval_total_count: total,
+        current_interval_usage_count: rawUsed,
+        current_weekly_total_count: undefined,
+        current_weekly_usage_count: undefined,
+        weekly_remains_time: undefined,
+      }),
+    ]);
 
-      const out = await runChinaProviderFetch();
+    const out = await runChinaProviderFetch();
 
-      expectAttemptedWithNoErrors(out);
-      expect(out.entries).toHaveLength(1);
-      expect(out.entries[0]).toMatchObject({
-        window: "five_hour",
-        right,
-        percentRemaining,
-      });
-    },
-  );
+    expectAttemptedWithNoErrors(out);
+    expect(out.entries).toHaveLength(1);
+    expect(out.entries[0]).toMatchObject({
+      right,
+      percentRemaining,
+    });
+  });
 
   it("selects the lowest-remaining China model using used-count semantics", async () => {
     mockMiniMaxChinaAuthConfigured("china-key");
@@ -251,7 +322,6 @@ describe("minimax-coding-plan provider", () => {
     expectAttemptedWithNoErrors(out);
     expect(out.entries).toHaveLength(1);
     expect(out.entries[0]).toMatchObject({
-      window: "five_hour",
       right: "1400/1500",
       percentRemaining: 7,
     });
@@ -265,9 +335,12 @@ describe("minimax-coding-plan provider", () => {
     expect(mocks.fetchWithTimeout).toHaveBeenCalledWith(
       "https://api.minimax.io/v1/api/openplatform/coding_plan/remains",
       expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: "Bearer intl-key" }),
+        request: expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: "Bearer intl-key" }),
+        }),
+        timeoutMs: undefined,
+        consume: expect.any(Function),
       }),
-      undefined,
     );
   });
 
@@ -297,10 +370,150 @@ describe("minimax-coding-plan provider", () => {
     expectAttemptedWithNoErrors(out);
     expect(out.entries).toHaveLength(1);
     expect(out.entries[0]).toMatchObject({
-      window: "five_hour",
       right: "0/3",
       percentRemaining: 100,
     });
+  });
+
+  it("falls back to provider-reported percentages for zero-count international rows", async () => {
+    mockMiniMaxAuthConfigured();
+    mockMiniMaxHttpSuccess([
+      createCodingPlanModel({
+        model_name: "general",
+        current_interval_total_count: 0,
+        current_interval_usage_count: 0,
+        current_weekly_total_count: 0,
+        current_weekly_usage_count: 0,
+        current_interval_remaining_percent: 86,
+        current_weekly_remaining_percent: 90,
+      }),
+    ]);
+
+    const out = await runProviderFetch();
+
+    expectAttemptedWithNoErrors(out);
+    expect(visibleEntries(out.entries, "minimax-coding-plan")).toMatchObject([
+      { right: "14%", percentRemaining: 86 },
+      { right: "10%", percentRemaining: 90 },
+    ]);
+  });
+
+  it("falls back to provider-reported percentages when count fields are missing", async () => {
+    mockMiniMaxAuthConfigured();
+    mockMiniMaxHttpSuccess([
+      {
+        model_name: "general",
+        remains_time: 13_987_604,
+        weekly_remains_time: 564_787_604,
+        current_interval_remaining_percent: 75,
+        current_weekly_remaining_percent: 80,
+      },
+    ]);
+
+    const out = await runProviderFetch();
+
+    expectAttemptedWithNoErrors(out);
+    expect(visibleEntries(out.entries, "minimax-coding-plan")).toMatchObject([
+      { right: "25%", percentRemaining: 75 },
+      { right: "20%", percentRemaining: 80 },
+    ]);
+  });
+
+  it.each([
+    { name: "zero", value: 0, right: "100%", percentRemaining: 0 },
+    { name: "negative", value: -25, right: "125%", percentRemaining: -25 },
+    { name: "above 100", value: 140, right: "0%", percentRemaining: 100 },
+  ])("preserves current percentage bounds for $name international fallback values", async ({
+    value,
+    right,
+    percentRemaining,
+  }) => {
+    mockMiniMaxAuthConfigured();
+    mockMiniMaxHttpSuccess([
+      createCodingPlanModel({
+        model_name: "general",
+        current_interval_total_count: 0,
+        current_interval_usage_count: 0,
+        current_weekly_total_count: undefined,
+        current_weekly_usage_count: undefined,
+        weekly_remains_time: undefined,
+        current_interval_remaining_percent: value,
+      }),
+    ]);
+
+    const out = await runProviderFetch();
+
+    expectAttemptedWithNoErrors(out);
+    expect(visibleEntries(out.entries, "minimax-coding-plan")).toMatchObject([
+      { right, percentRemaining },
+    ]);
+  });
+
+  it.each([
+    { name: "missing", value: undefined },
+    { name: "null", value: null },
+    { name: "wrong type", value: "50" },
+    { name: "NaN", value: Number.NaN },
+    { name: "infinite", value: Number.POSITIVE_INFINITY },
+  ])("omits $name international fallback percentages", async ({ value }) => {
+    mockMiniMaxAuthConfigured();
+    mockMiniMaxHttpSuccess([
+      createCodingPlanModel({
+        model_name: "general",
+        current_interval_total_count: 0,
+        current_interval_usage_count: 0,
+        current_weekly_total_count: undefined,
+        current_weekly_usage_count: undefined,
+        weekly_remains_time: undefined,
+        current_interval_remaining_percent: value,
+      }),
+    ]);
+
+    const out = await runProviderFetch();
+
+    expectAttemptedWithNoErrors(out);
+    expect(out.entries).toHaveLength(0);
+  });
+
+  it("keeps valid international counts authoritative over provider-reported percentages", async () => {
+    mockMiniMaxAuthConfigured();
+    mockMiniMaxHttpSuccess([
+      createCodingPlanModel({
+        model_name: "general",
+        current_interval_total_count: 100,
+        current_interval_usage_count: 25,
+        current_weekly_total_count: undefined,
+        current_weekly_usage_count: undefined,
+        weekly_remains_time: undefined,
+        current_interval_remaining_percent: 90,
+      }),
+    ]);
+
+    const out = await runProviderFetch();
+
+    expectAttemptedWithNoErrors(out);
+    expect(visibleEntries(out.entries, "minimax-coding-plan")).toMatchObject([
+      { right: "75/100", percentRemaining: 25 },
+    ]);
+  });
+
+  it("does not apply the international percentage fallback to China endpoint counts", async () => {
+    mockMiniMaxChinaAuthConfigured();
+    mockMiniMaxHttpSuccess([
+      createCodingPlanModel({
+        current_interval_total_count: 0,
+        current_interval_usage_count: 0,
+        current_weekly_total_count: undefined,
+        current_weekly_usage_count: undefined,
+        weekly_remains_time: undefined,
+        current_interval_remaining_percent: 80,
+      }),
+    ]);
+
+    const out = await runChinaProviderFetch();
+
+    expectAttemptedWithNoErrors(out);
+    expect(out.entries).toHaveLength(0);
   });
 
   it("selects the lowest-remaining international generic row", async () => {
@@ -329,7 +542,6 @@ describe("minimax-coding-plan provider", () => {
     expectAttemptedWithNoErrors(out);
     expect(out.entries).toHaveLength(1);
     expect(out.entries[0]).toMatchObject({
-      window: "five_hour",
       right: "8/10",
       percentRemaining: 20,
     });
@@ -366,12 +578,10 @@ describe("minimax-coding-plan provider", () => {
     expectAttemptedWithNoErrors(out);
     expect(out.entries).toHaveLength(2);
     expect(out.entries[0]).toMatchObject({
-      window: "five_hour",
       right: "4550/4500",
       percentRemaining: -1,
     });
     expect(out.entries[1]).toMatchObject({
-      window: "weekly",
       right: "45500/45000",
       percentRemaining: -1,
     });
@@ -432,12 +642,10 @@ describe("minimax-coding-plan provider", () => {
     expectAttemptedWithNoErrors(out);
     expect(out.entries).toHaveLength(2);
     expect(out.entries[0]).toMatchObject({
-      window: "five_hour",
       right: "200/4500",
       percentRemaining: 96,
     });
     expect(out.entries[1]).toMatchObject({
-      window: "weekly",
       right: "500/45000",
       percentRemaining: 99,
     });
@@ -464,12 +672,10 @@ describe("minimax-coding-plan provider", () => {
     expectAttemptedWithNoErrors(out);
     expect(out.entries).toHaveLength(2);
     expect(out.entries[0]).toMatchObject({
-      window: "five_hour",
       right: "100/4500",
       percentRemaining: 98,
     });
     expect(out.entries[1]).toMatchObject({
-      window: "weekly",
       right: "105/45000",
       percentRemaining: 100,
     });
@@ -495,7 +701,7 @@ describe("minimax-coding-plan provider", () => {
 
   it("returns error on non-zero status code", async () => {
     mockMiniMaxAuthConfigured();
-    mocks.fetchWithTimeout.mockResolvedValueOnce({
+    mocks.fetchResponse.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
         model_remains: [],
@@ -510,7 +716,7 @@ describe("minimax-coding-plan provider", () => {
 
   it("sanitizes status messages and thrown errors", async () => {
     mockMiniMaxAuthConfigured();
-    mocks.fetchWithTimeout.mockResolvedValueOnce({
+    mocks.fetchResponse.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
         model_remains: [],
@@ -523,10 +729,12 @@ describe("minimax-coding-plan provider", () => {
 
     const statusOut = await minimaxCodingPlanProvider.fetch({ config: {} } as any);
     expectAttemptedWithErrorLabel(statusOut, "MiniMax Coding Plan");
-    expect(statusOut.errors[0]?.message).toBe(`MiniMax API error: ${`${"x".repeat(140)} retry`.slice(0, 120)}`);
+    expect(statusOut.errors[0]?.message).toBe(
+      `MiniMax API error: ${`${"x".repeat(140)} retry`.slice(0, 120)}`,
+    );
 
     mockMiniMaxAuthConfigured();
-    mocks.fetchWithTimeout.mockRejectedValueOnce(new Error("network\nfailed"));
+    mocks.fetchResponse.mockRejectedValueOnce(new Error("network\nfailed"));
 
     const thrownOut = await minimaxCodingPlanProvider.fetch({ config: {} } as any);
     expectAttemptedWithErrorLabel(thrownOut, "MiniMax Coding Plan");
@@ -590,15 +798,22 @@ describe("minimax-coding-plan provider", () => {
     mocks.isCanonicalProviderAvailable.mockResolvedValueOnce(true);
     mocks.resolveMiniMaxAuthCached.mockResolvedValueOnce(authState);
 
-    const available = await minimaxCodingPlanProvider.isAvailable({ config: { enabledProviders: "auto" } } as any);
+    const available = await minimaxCodingPlanProvider.isAvailable({
+      config: { enabledProviders: "auto" },
+    } as any);
     expect(available).toBe(expected);
   });
 
   it("returns false when auth exists but the minimax provider is not configured", async () => {
     mocks.isCanonicalProviderAvailable.mockResolvedValueOnce(false);
-    mocks.resolveMiniMaxAuthCached.mockResolvedValueOnce({ state: "configured", apiKey: "test-key" });
+    mocks.resolveMiniMaxAuthCached.mockResolvedValueOnce({
+      state: "configured",
+      apiKey: "test-key",
+    });
 
-    const available = await minimaxCodingPlanProvider.isAvailable({ config: { enabledProviders: "auto" } } as any);
+    const available = await minimaxCodingPlanProvider.isAvailable({
+      config: { enabledProviders: "auto" },
+    } as any);
     expect(available).toBe(false);
     expect(mocks.resolveMiniMaxAuthCached).not.toHaveBeenCalled();
   });

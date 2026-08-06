@@ -1,8 +1,7 @@
-import type { QuotaRenderData } from "./quota-render-data.js";
-import type { QuotaToastConfig } from "./types.js";
-
 import { sanitizeQuotaRenderData } from "./display-sanitize.js";
 import { formatQuotaRows } from "./format.js";
+import type { QuotaRenderData } from "./quota-render-data.js";
+import type { QuotaToastConfig } from "./types.js";
 
 export const TUI_SIDEBAR_MAX_WIDTH = 36;
 export const TUI_SIDEBAR_LAYOUT = {
@@ -13,7 +12,7 @@ export const TUI_SIDEBAR_LAYOUT = {
 
 export function buildSidebarQuotaPanelLines(params: {
   data: QuotaRenderData;
-  config: Pick<QuotaToastConfig, "formatStyle" | "percentDisplayMode">;
+  config: Pick<QuotaToastConfig, "formatStyle" | "percentDisplayMode" | "resetTimeDecimals">;
 }): string[] {
   const data = sanitizeQuotaRenderData(params.data);
 
@@ -24,6 +23,7 @@ export function buildSidebarQuotaPanelLines(params: {
     errors: data.errors,
     style: params.config.formatStyle,
     percentDisplayMode: params.config.percentDisplayMode,
+    resetTimeDecimals: params.config.resetTimeDecimals,
     sessionTokens: data.sessionTokens,
   });
   return quotaBody ? quotaBody.split("\n") : [];

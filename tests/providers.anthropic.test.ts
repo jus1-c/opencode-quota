@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-
+import { anthropicProvider } from "../src/providers/anthropic.js";
 import {
   expectAttemptedWithErrorLabel,
   expectAttemptedWithNoErrors,
   expectNotAttempted,
+  visibleEntries,
 } from "./helpers/provider-assertions.js";
 import { createProviderAvailabilityContext } from "./helpers/provider-test-harness.js";
-import { anthropicProvider } from "../src/providers/anthropic.js";
 
 vi.mock("../src/lib/anthropic.js", () => ({
   hasAnthropicCredentialsConfigured: vi.fn(),
@@ -32,7 +32,7 @@ describe("anthropic provider", () => {
 
     const out = await anthropicProvider.fetch({} as any);
     expectAttemptedWithNoErrors(out);
-    expect(out.entries).toEqual([
+    expect(visibleEntries(out.entries, "anthropic")).toEqual([
       {
         name: "Claude 5h",
         group: "Claude",
@@ -61,7 +61,7 @@ describe("anthropic provider", () => {
 
     const out = await anthropicProvider.fetch({} as any);
     expectAttemptedWithNoErrors(out);
-    expect(out.entries).toEqual([
+    expect(visibleEntries(out.entries, "anthropic")).toEqual([
       {
         name: "Claude 5h",
         group: "Claude",
@@ -104,7 +104,9 @@ describe("anthropic provider", () => {
     (hasAnthropicCredentialsConfigured as any).mockResolvedValue(true);
 
     await expect(
-      anthropicProvider.isAvailable(createProviderAvailabilityContext({ providerIds: ["anthropic"] })),
+      anthropicProvider.isAvailable(
+        createProviderAvailabilityContext({ providerIds: ["anthropic"] }),
+      ),
     ).resolves.toBe(true);
     await expect(
       anthropicProvider.isAvailable(createProviderAvailabilityContext({ providerIds: ["claude"] })),

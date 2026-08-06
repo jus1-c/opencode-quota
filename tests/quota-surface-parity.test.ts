@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +9,13 @@ import {
   createPricingModuleMock,
   createProvidersRegistryModuleMock,
 } from "./helpers/plugin-test-harness.js";
+
+const TEST_ACCOUNTING = {
+  resultType: "quota",
+  acquisitionMethod: "remote_api",
+  ownership: "maintained",
+  authority: "provider_reported",
+} as const;
 
 const mocks = vi.hoisted(() => ({
   mockProviders: [] as any[],
@@ -29,6 +36,13 @@ vi.mock("../src/providers/registry.js", () =>
 );
 
 vi.mock("../src/lib/modelsdev-pricing.js", () => createPricingModuleMock(mocks));
+
+async function loadSidebarPanel(
+  params: Parameters<typeof import("../src/lib/tui-runtime.js").loadTuiSessionQuotaSurfaces>[0],
+) {
+  const { loadTuiSessionQuotaSurfaces } = await import("../src/lib/tui-runtime.js");
+  return (await loadTuiSessionQuotaSurfaces(params)).sidebar;
+}
 
 function seedPricingMocks(): void {
   mocks.getPricingSnapshotMeta.mockReturnValue({
@@ -74,7 +88,13 @@ function createClient(params: {
 async function buildQuotaDialogOutputText(params: {
   client: ReturnType<typeof createClient>;
   sessionID: string;
-  roots?: { workspaceRoot?: string; worktreeRoot?: string; configRoot?: string; fallbackDirectory?: string; activeDirectory?: string };
+  roots?: {
+    workspaceRoot?: string;
+    worktreeRoot?: string;
+    configRoot?: string;
+    fallbackDirectory?: string;
+    activeDirectory?: string;
+  };
 }): Promise<string> {
   const { buildQuotaDialogCommandOutput } = await import("../src/lib/quota-dialog-commands.js");
   const result = await buildQuotaDialogCommandOutput({
@@ -89,8 +109,8 @@ async function buildQuotaDialogOutputText(params: {
     resolveSessionMeta: async (sessionID) => {
       const response = await params.client.session.get({ path: { id: sessionID } });
       return {
-        modelID: response.data?.modelID,
-        providerID: response.data?.providerID,
+        modelID: response.data?.model?.id,
+        providerID: response.data?.model?.providerID,
       };
     },
   });
@@ -150,6 +170,7 @@ describe("quota surface parity regressions", () => {
         attempted: true,
         entries: [
           {
+            accounting: TEST_ACCOUNTING,
             name: "Synthetic Weekly",
             group: "Synthetic",
             label: "Weekly:",
@@ -219,7 +240,6 @@ describe("quota surface parity regressions", () => {
 
     await resetQuotaStateForTests();
 
-    const { loadSidebarPanel } = await import("../src/lib/tui-runtime.js");
     const panel = await loadSidebarPanel({
       api: {
         state: {
@@ -250,6 +270,7 @@ describe("quota surface parity regressions", () => {
         attempted: true,
         entries: [
           {
+            accounting: TEST_ACCOUNTING,
             name: "Synthetic Weekly",
             group: "Synthetic",
             label: "Weekly:",
@@ -331,6 +352,7 @@ describe("quota surface parity regressions", () => {
         attempted: true,
         entries: [
           {
+            accounting: TEST_ACCOUNTING,
             name: "Synthetic Weekly",
             group: "Synthetic",
             label: "Weekly:",
@@ -349,6 +371,7 @@ describe("quota surface parity regressions", () => {
         attempted: true,
         entries: [
           {
+            accounting: TEST_ACCOUNTING,
             name: "OpenAI Pro",
             group: "OpenAI",
             label: "Pro:",
@@ -424,7 +447,6 @@ describe("quota surface parity regressions", () => {
 
     await resetQuotaStateForTests();
 
-    const { loadSidebarPanel } = await import("../src/lib/tui-runtime.js");
     const panel = await loadSidebarPanel({
       api: {
         state: {
@@ -458,6 +480,7 @@ describe("quota surface parity regressions", () => {
         attempted: true,
         entries: [
           {
+            accounting: TEST_ACCOUNTING,
             name: "Synthetic 5h",
             group: "Synthetic",
             label: "5h:",
@@ -466,6 +489,7 @@ describe("quota surface parity regressions", () => {
             resetTimeIso: "2099-01-01T00:00:00.000Z",
           },
           {
+            accounting: TEST_ACCOUNTING,
             name: "Synthetic Weekly",
             group: "Synthetic",
             label: "Weekly:",
@@ -514,7 +538,6 @@ describe("quota surface parity regressions", () => {
     // Force sidebar path to reuse persisted shared snapshot storage (not in-memory).
     await resetQuotaStateForTests();
 
-    const { loadSidebarPanel } = await import("../src/lib/tui-runtime.js");
     const panel = await loadSidebarPanel({
       api: {
         state: {
@@ -548,6 +571,7 @@ describe("quota surface parity regressions", () => {
         attempted: true,
         entries: [
           {
+            accounting: TEST_ACCOUNTING,
             name: "OpenAI Pro 5h",
             group: "OpenAI (Pro)",
             label: "5h:",
@@ -555,6 +579,7 @@ describe("quota surface parity regressions", () => {
             resetTimeIso: "2099-01-01T00:00:00.000Z",
           },
           {
+            accounting: TEST_ACCOUNTING,
             name: "OpenAI Pro Weekly",
             group: "OpenAI (Pro)",
             label: "Weekly:",
@@ -602,7 +627,6 @@ describe("quota surface parity regressions", () => {
     // Ensure sidebar reads from shared persisted snapshot, then projects as single-window.
     await resetQuotaStateForTests();
 
-    const { loadSidebarPanel } = await import("../src/lib/tui-runtime.js");
     const panel = await loadSidebarPanel({
       api: {
         state: {
