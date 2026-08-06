@@ -139,7 +139,7 @@ function redactPat(text: string, pat: string): string {
 }
 
 export function formatVilaoVnd(value: number): string {
-  return `${new Intl.NumberFormat("vi-VN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)} VND`;
+  return `${new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 0 }).format(value)} VND`;
 }
 
 export async function queryVilaoQuota(
