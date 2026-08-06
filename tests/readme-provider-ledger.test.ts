@@ -90,6 +90,7 @@ describe("README provider ledger", () => {
         "OpenCode Zen",
         "OpenRouter",
         "Synthetic",
+        "Vilao",
         "xAI SuperGrok",
       ],
       [

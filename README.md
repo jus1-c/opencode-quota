@@ -152,6 +152,7 @@ Use the CLI for scripts, CI, or a quick terminal check outside OpenCode.
 | OpenCode Zen       | [Needs setup](docs/readme/providers.md#opencode-zen)           | Dashboard scraping | Budget and balance |
 | OpenRouter         | Automatic                                                      | Remote API         | Budget and spend   |
 | Synthetic          | Automatic                                                      | Remote API         | Quota              |
+| Vilao              | [Needs setup](docs/readme/providers.md#vilao)                  | Remote API         | Balance            |
 | xAI SuperGrok      | Automatic                                                      | Remote API         | Quota              |
 
 </details>

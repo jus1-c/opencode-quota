@@ -581,6 +581,14 @@ function supportedProviderPricingRow(params: {
     };
   }
 
+  if (id === "vilao") {
+    return {
+      id,
+      pricing: "no",
+      notes: "pay-as-you-go balance against a locally observed baseline (not token-priced)",
+    };
+  }
+
   if (id === "opencode-go") {
     return {
       id,
@@ -914,6 +922,7 @@ export async function buildQuotaStatusReport(params: {
     { id: "synthetic", title: "synthetic:", providerId: "synthetic" },
     { id: "chutes", title: "chutes:", providerId: "chutes" },
     { id: "deepseek", title: "deepseek:", providerId: "deepseek" },
+    { id: "vilao", title: "vilao:", providerId: "vilao" },
     { id: "xai", title: "xai:", providerId: "xai", includeDetails: false },
     { id: "nanogpt", title: "nanogpt:", providerId: "nanogpt" },
     {

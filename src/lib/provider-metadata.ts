@@ -3,6 +3,7 @@ export type QuotaProviderAutoSetup = "yes" | "usually" | "manual_env_config" | "
 export type QuotaProviderAuthentication =
   | "opencode_auth_oauth_token"
   | "opencode_auth_api_key"
+  | "opencode_auth_metadata_token"
   | "companion_auth_oauth_token"
   | "local_cli_auth"
   | "github_oauth_or_pat"
@@ -282,6 +283,18 @@ const PROVIDER_CATALOG_SOURCE = {
       quota: "remote_api",
       notes:
         "separate provider caches gateway credential in OS keychain and stores access/refresh tokens in OpenCode auth metadata",
+    },
+  },
+  vilao: {
+    label: "Vilao",
+    runtimeIds: ["vilao"],
+    synonyms: [],
+    shape: {
+      autoSetup: "needs_quick_setup",
+      authentication: "opencode_auth_metadata_token",
+      quota: "remote_api",
+      quickSetupAnchor: "vilao",
+      notes: "pay-as-you-go balance relative to the highest locally observed balance",
     },
   },
   xai: {

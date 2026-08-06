@@ -16,12 +16,12 @@ import { googleAntigravityProvider } from "./google-antigravity.js";
 import { googleGeminiCliProvider } from "./google-gemini-cli.js";
 import { kiloProvider } from "./kilo.js";
 import { kimiCodeProvider } from "./kimi-code.js";
+import { llmGateProvider } from "./llmgate.js";
 import { xiaomiProvider } from "./mimo.js";
 import {
   minimaxChinaCodingPlanProvider,
   minimaxCodingPlanProvider,
 } from "./minimax-coding-plan.js";
-import { llmGateProvider } from "./llmgate.js";
 import { nanoGptProvider } from "./nanogpt.js";
 import { ollamaCloudProvider } from "./ollama-cloud.js";
 import { openaiProvider } from "./openai.js";
@@ -31,6 +31,7 @@ import { openRouterProvider } from "./openrouter.js";
 import { quotaProvidersProvider } from "./quota-providers.js";
 import { qwenCodeProvider } from "./qwen-code.js";
 import { syntheticProvider } from "./synthetic.js";
+import { vilaoProvider } from "./vilao.js";
 import { xaiProvider } from "./xai.js";
 import { zaiProvider } from "./zai.js";
 import { zhipuProvider } from "./zhipu.js";
@@ -59,6 +60,7 @@ export function getProviders(): QuotaProvider[] {
     kimiCodeProvider,
     deepseekProvider,
     llmGateProvider,
+    vilaoProvider,
     xaiProvider,
     xiaomiProvider,
     opencodeGoProvider,

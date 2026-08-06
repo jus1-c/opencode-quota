@@ -243,6 +243,14 @@ export const PROVIDER_ACCOUNTING_LEDGER: Record<string, Array<QuotaToastEntry["a
       authority: "provider_reported",
     },
   ],
+  vilao: [
+    {
+      resultType: "balance",
+      acquisitionMethod: "remote_api",
+      ownership: "maintained",
+      authority: "locally_derived",
+    },
+  ],
   xai: [
     {
       resultType: "quota",

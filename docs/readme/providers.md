@@ -7,7 +7,7 @@
 | Find                                 | Go to                                                                                                                                                                                                                 |
 | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Provider support                     | [Pre-configured providers](#pre-configured-providers) · [Custom providers](#custom-providers)                                                                                                                         |
-| Billing, API key, or dashboard setup | [GitHub Copilot](#github-copilot) · [DeepSeek](#deepseek) · [Kilo Gateway](#kilo-gateway) · [LLMGate](#llmgate) · [Xiaomi MiMo](#xiaomi-mimo) · [Ollama Cloud](#ollama-cloud) · [OpenCode Go](#opencode-go) · [OpenCode Zen](#opencode-zen) |
+| Billing, API key, or dashboard setup | [GitHub Copilot](#github-copilot) · [DeepSeek](#deepseek) · [Kilo Gateway](#kilo-gateway) · [LLMGate](#llmgate) · [Vilao](#vilao) · [Xiaomi MiMo](#xiaomi-mimo) · [Ollama Cloud](#ollama-cloud) · [OpenCode Go](#opencode-go) · [OpenCode Zen](#opencode-zen) |
 | CLI or companion-plugin setup        | [Anthropic](#anthropic-claude) · [Cursor](#cursor) · [Qwen Code](#qwen-code) · [Google Antigravity](#google-antigravity) · [Google AGY](#google-agy-quick-setup) · [Gemini CLI (deprecated)](#gemini-cli)             |
 
 ## Pre-configured providers
@@ -36,6 +36,7 @@ Most providers work automatically. `Automatic` means OpenCode Quota reuses the c
 | OpenCode Zen       | [Needs setup](#opencode-zen)           | Dashboard scraping | Budget and balance |
 | OpenRouter         | Automatic                              | Remote API         | Budget and spend   |
 | Synthetic          | Automatic                              | Remote API         | Quota              |
+| Vilao              | [Needs setup](#vilao)                  | Remote API         | Balance            |
 | xAI SuperGrok      | Automatic                              | Remote API         | Quota              |
 
 </details>
@@ -531,6 +532,21 @@ or manage keychain entries. In manual quota selection mode, include `llmgate` in
 
 If LLMGate requires Turnstile, complete it in the LLMGate dashboard before
 signing in. Neither provider nor quota plugin bypasses Turnstile.
+
+<a id="vilao"></a>
+
+### Vilao
+
+Vilao quota support uses the PAT stored by `opencode-vilao-provider`. Install
+and load that provider before `opencode-quota`, then connect Vilao through
+OpenCode. `opencode-quota` reads only
+`metadata.vilao_pat`, never the inference API key.
+
+Vilao is pay as you go, so the first observed account balance becomes 100%.
+Later balances are shown relative to that local high-water mark. When a future
+balance exceeds the stored baseline after a top-up, the new balance becomes
+100%. This baseline is local observation state, not a provider-reported limit.
+In manual quota selection mode, include `vilao` in `enabledProviders`.
 
 <a id="xiaomi-mimo"></a>
 

@@ -25,6 +25,7 @@ const EXPECTED_PROVIDER_ORDER = [
   "kimi-for-coding",
   "deepseek",
   "llmgate",
+  "vilao",
   "xai",
   "xiaomi",
   "opencode-go",

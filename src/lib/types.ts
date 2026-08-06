@@ -349,6 +349,12 @@ export interface LlmGateAuthData {
   metadata?: Record<string, string>;
 }
 
+export interface VilaoAuthData {
+  type: "api";
+  key: string;
+  metadata?: Record<string, string>;
+}
+
 export interface SyntheticAuthData {
   type: "api";
   key: string;
@@ -441,6 +447,7 @@ export interface AuthData {
   "nano-gpt"?: NanoGptAuthData;
   deepseek?: DeepSeekAuthData;
   llmgate?: LlmGateAuthData;
+  vilao?: VilaoAuthData;
   cursor?: CursorOAuthAuthData;
   // Canonical OpenCode provider id used by the Qwen auth plugin.
   "qwen-code"?: QwenOAuthAuthData;

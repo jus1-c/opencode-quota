@@ -1581,6 +1581,7 @@ zhipu:
 synthetic:
 chutes:
 deepseek:
+vilao:
 xai:
 nanogpt:
 copilot_quota_auth:

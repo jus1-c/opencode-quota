@@ -249,6 +249,9 @@ export interface QuotaProvider {
   /** Fetch and normalize quota for this provider */
   fetch: (ctx: QuotaProviderContext) => Promise<QuotaProviderResult>;
 
+  /** Optional non-secret identity used to isolate cached results between accounts. */
+  cacheIdentity?: () => Promise<string | undefined>;
+
   /** Optional provider match for onlyCurrentModel filtering */
   matchesCurrentModel?: (model: string, context?: QuotaProviderMatchContext) => boolean;
 }

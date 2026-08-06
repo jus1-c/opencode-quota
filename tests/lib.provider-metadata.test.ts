@@ -167,6 +167,14 @@ describe("provider-metadata", () => {
         notes: "separate provider caches gateway credential in OS keychain and stores access/refresh tokens in OpenCode auth metadata",
       },
       {
+        id: "vilao",
+        autoSetup: "needs_quick_setup",
+        authentication: "opencode_auth_metadata_token",
+        quota: "remote_api",
+        quickSetupAnchor: "vilao",
+        notes: "pay-as-you-go balance relative to the highest locally observed balance",
+      },
+      {
         id: "xai",
         autoSetup: "yes",
         authentication: "opencode_auth_oauth_token",
