@@ -16,7 +16,7 @@ vi.mock("../src/lib/vilao.js", () => ({
 }));
 
 describe("vilao provider", () => {
-  it("keeps amounts in an expanded-only value row", async () => {
+  it("keeps remaining and max amounts in the expanded percent label", async () => {
     const { queryVilaoQuota } = await import("../src/lib/vilao.js");
     (queryVilaoQuota as any).mockResolvedValueOnce({
       success: true,
@@ -32,22 +32,8 @@ describe("vilao provider", () => {
       {
         name: "Vilao Balance",
         group: "Vilao",
-        label: "₫:",
+        label: "40000.00/100000.00 VND",
         percentRemaining: 40,
-      },
-      {
-        kind: "value",
-        name: "Vilao Remaining Balance",
-        group: "Vilao",
-        label: "Remaining:",
-        value: "40000.00 VND",
-      },
-      {
-        kind: "value",
-        name: "Vilao Maximum Balance",
-        group: "Vilao",
-        label: "Max:",
-        value: "100000.00 VND",
       },
     ]);
     expect(out.rawDetails).toEqual([

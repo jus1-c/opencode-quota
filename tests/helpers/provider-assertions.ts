@@ -250,18 +250,6 @@ export const PROVIDER_ACCOUNTING_LEDGER: Record<string, Array<QuotaToastEntry["a
       ownership: "maintained",
       authority: "locally_derived",
     },
-    {
-      resultType: "balance",
-      acquisitionMethod: "remote_api",
-      ownership: "maintained",
-      authority: "locally_derived",
-    },
-    {
-      resultType: "balance",
-      acquisitionMethod: "remote_api",
-      ownership: "maintained",
-      authority: "locally_derived",
-    },
   ],
   xai: [
     {
