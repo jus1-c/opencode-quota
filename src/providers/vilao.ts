@@ -37,26 +37,21 @@ export const vilaoProvider: QuotaProvider = {
     const mapped = mapNullableProviderResult(result, {
       errorLabel: "Vilao",
       onSuccess: (success) => ({
-        ...attemptedResult(
-          [
-            {
-              accounting: {
-                resultType: "balance",
-                acquisitionMethod: "remote_api",
-                ownership: "maintained",
-                authority: "locally_derived",
-                observedAtIso: new Date().toISOString(),
-              },
-              name: "Vilao Balance",
-              group: "Vilao",
-              label: "Balance:",
-              right: `${formatVilaoVnd(success.balance)} / ${formatVilaoVnd(success.baseline)}`,
-              percentRemaining: success.percentRemaining,
+        ...attemptedResult([
+          {
+            accounting: {
+              resultType: "balance",
+              acquisitionMethod: "remote_api",
+              ownership: "maintained",
+              authority: "locally_derived",
+              observedAtIso: new Date().toISOString(),
             },
-          ],
-          [],
-          { singleWindowShowRight: true },
-        ),
+            name: "Vilao Balance",
+            group: "Vilao",
+            label: `:: ${formatVilaoVnd(success.balance).replace(" VND", "")} / ${formatVilaoVnd(success.baseline).replace(" VND", "")} ₫`,
+            percentRemaining: success.percentRemaining,
+          },
+        ]),
         rawDetails: [
           { key: "balance", value: formatVilaoVnd(success.balance) },
           { key: "observed_baseline", value: formatVilaoVnd(success.baseline) },

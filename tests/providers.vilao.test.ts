@@ -12,11 +12,11 @@ vi.mock("../src/lib/vilao.js", () => ({
     statePath: "/tmp/state.json",
   })),
   getVilaoCacheIdentity: vi.fn(async () => "account-fingerprint"),
-  formatVilaoVnd: vi.fn((value: number) => `${value.toFixed(2)} VND`),
+  formatVilaoVnd: vi.fn((value: number) => `${Math.round(value)} VND`),
 }));
 
 describe("vilao provider", () => {
-  it("maps the observed balance into one percent row", async () => {
+  it("keeps remaining and max amounts in the expanded percent label", async () => {
     const { queryVilaoQuota } = await import("../src/lib/vilao.js");
     (queryVilaoQuota as any).mockResolvedValueOnce({
       success: true,
@@ -32,16 +32,15 @@ describe("vilao provider", () => {
       {
         name: "Vilao Balance",
         group: "Vilao",
-        label: "Balance:",
-        right: "40000.00 VND / 100000.00 VND",
+        label: ":: 40000 / 100000 ₫",
         percentRemaining: 40,
       },
     ]);
     expect(out.rawDetails).toEqual([
-      { key: "balance", value: "40000.00 VND" },
-      { key: "observed_baseline", value: "100000.00 VND" },
+      { key: "balance", value: "40000 VND" },
+      { key: "observed_baseline", value: "100000 VND" },
     ]);
-    expect(out.presentation).toEqual({ singleWindowShowRight: true });
+    expect(out.presentation).toBeUndefined();
   });
 
   it("matches Vilao model ids and uses PAT presence for availability", async () => {
