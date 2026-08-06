@@ -135,27 +135,31 @@ async function fetchOverview(
   | { state: "failed"; error: string }
 > {
   try {
-    const response = await fetchWithTimeout(
+    return await fetchWithTimeout(
       LLMGATE_BILLING_OVERVIEW_URL,
       {
-        method: "GET",
-        headers: {
-          Accept: "application/json",
-          Authorization: `Bearer ${auth.accessToken}`,
-          "User-Agent": USER_AGENT,
+        request: {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+            Authorization: `Bearer ${auth.accessToken}`,
+            "User-Agent": USER_AGENT,
+          },
+        },
+        timeoutMs: requestTimeoutMs,
+        consume: async (response) => {
+          if (response.status === 401 || response.status === 403) return { state: "unauthorized" };
+          if (!response.ok) {
+            return {
+              state: "failed",
+              error: `LLMGate API error ${response.status}: ${sanitizeDisplaySnippet(await response.text(), 120)}`,
+            };
+          }
+          const parsed = parseOverview(await response.json());
+          return parsed.success ? { state: "success", data: parsed } : { state: "failed", error: parsed.error };
         },
       },
-      requestTimeoutMs,
     );
-    if (response.status === 401 || response.status === 403) return { state: "unauthorized" };
-    if (!response.ok) {
-      return {
-        state: "failed",
-        error: `LLMGate API error ${response.status}: ${sanitizeDisplaySnippet(await response.text(), 120)}`,
-      };
-    }
-    const parsed = parseOverview(await response.json());
-    return parsed.success ? { state: "success", data: parsed } : { state: "failed", error: parsed.error };
   } catch (error) {
     return {
       state: "failed",

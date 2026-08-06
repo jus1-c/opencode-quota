@@ -1,15 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
-
+import { chutesProvider } from "../src/providers/chutes.js";
 import {
   expectAttemptedWithErrorLabel,
   expectAttemptedWithNoErrors,
   expectNotAttempted,
+  visibleEntries,
 } from "./helpers/provider-assertions.js";
-import { chutesProvider } from "../src/providers/chutes.js";
 
 vi.mock("../src/lib/chutes.js", () => ({
   queryChutesQuota: vi.fn(),
   hasChutesApiKeyConfigured: vi.fn(),
+  getChutesKeyDiagnostics: vi.fn(async () => ({
+    configured: false,
+    source: null,
+    checkedPaths: [],
+  })),
 }));
 
 vi.mock("../src/lib/provider-availability.js", () => ({
@@ -35,7 +40,7 @@ describe("chutes provider", () => {
 
     const out = await chutesProvider.fetch({ config: { formatStyle: "classic" } } as any);
     expectAttemptedWithNoErrors(out);
-    expect(out.entries).toEqual([
+    expect(visibleEntries(out.entries, "chutes")).toEqual([
       {
         name: "Chutes",
         percentRemaining: 75,

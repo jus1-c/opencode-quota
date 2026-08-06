@@ -9,13 +9,14 @@ import type {
   QuotaToastEntry,
 } from "../lib/entries.js";
 import { isCanonicalProviderAvailable } from "../lib/provider-availability.js";
+import { modelProviderIncludesAny } from "../lib/provider-model-matching.js";
 import {
+  getSyntheticKeyDiagnostics,
   hasSyntheticApiKeyConfigured,
   querySyntheticQuota,
 } from "../lib/synthetic.js";
 import type { SyntheticQuotaWindow } from "../lib/types.js";
-import { modelProviderIncludesAny } from "../lib/provider-model-matching.js";
-import { attemptedResult, mapNullableProviderResult } from "./result-helpers.js";
+import { attemptedResult, mapNullableProviderResult, withStatusDetails } from "./result-helpers.js";
 
 function formatSyntheticRoundedValue(value: number): string {
   if (!Number.isFinite(value)) return "0";
@@ -37,6 +38,12 @@ function toSyntheticEntry(params: {
   const right = formatSyntheticSummary(params.window, params.currency);
 
   return {
+    accounting: {
+      resultType: "quota",
+      acquisitionMethod: "remote_api",
+      ownership: "maintained",
+      authority: "provider_reported",
+    },
     name: `Synthetic ${params.suffix}`,
     group: "Synthetic",
     label: params.label,
@@ -65,9 +72,13 @@ export const syntheticProvider: QuotaProvider = {
   },
 
   async fetch(ctx: QuotaProviderContext): Promise<QuotaProviderResult> {
+    const diagnostics = await getSyntheticKeyDiagnostics().catch(() => ({
+      configured: false,
+      source: null,
+      checkedPaths: [],
+    }));
     const result = await querySyntheticQuota({ requestTimeoutMs: ctx.config?.requestTimeoutMs });
-
-    return mapNullableProviderResult(result, {
+    const providerResult = mapNullableProviderResult(result, {
       errorLabel: "Synthetic",
       onSuccess: (result) =>
         attemptedResult(
@@ -90,5 +101,7 @@ export const syntheticProvider: QuotaProvider = {
           },
         ),
     });
+    const detail = `configured=${diagnostics.configured ? "true" : "false"}${diagnostics.source ? ` source=${diagnostics.source}` : ""}${diagnostics.checkedPaths.length > 0 ? ` checked=${diagnostics.checkedPaths.join(" | ")}` : ""}`;
+    return withStatusDetails(providerResult, [{ key: "synthetic api key", value: detail }]);
   },
 };

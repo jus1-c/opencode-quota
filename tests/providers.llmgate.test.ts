@@ -4,6 +4,7 @@ import {
   expectAttemptedWithErrorLabel,
   expectAttemptedWithNoErrors,
   expectNotAttempted,
+  visibleEntries,
 } from "./helpers/provider-assertions.js";
 import { llmGateProvider } from "../src/providers/llmgate.js";
 
@@ -52,7 +53,7 @@ describe("llmgate provider", () => {
     const out = await llmGateProvider.fetch({ config: { requestTimeoutMs: 1234 } } as any);
     expectAttemptedWithNoErrors(out);
     expect(queryLlmGateQuota).toHaveBeenCalledWith({ requestTimeoutMs: 1234 });
-    expect(out.entries).toEqual([
+    expect(visibleEntries(out.entries, "llmgate")).toEqual([
       {
         name: "LLMGate Pro 5x 5h",
         group: "LLMGate Pro 5x",

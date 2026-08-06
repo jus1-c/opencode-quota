@@ -6,7 +6,6 @@
  * toasts or transcript output.
  */
 
-import type { QuotaRenderData } from "./quota-render-data.js";
 import type {
   QuotaProviderResult,
   QuotaToastEntry,
@@ -14,6 +13,7 @@ import type {
   SessionTokensData,
 } from "./entries.js";
 import { isValueEntry } from "./entries.js";
+import type { QuotaRenderData } from "./quota-render-data.js";
 
 // Remove terminal escape sequences (CSI/OSC/DCS/APC/PM/SOS) and other control
 // characters except newline/tab so provider text cannot inject terminal actions.
@@ -47,6 +47,7 @@ export function sanitizeQuotaToastEntry(entry: QuotaToastEntry): QuotaToastEntry
   if (isValueEntry(entry)) {
     return {
       ...entry,
+      accounting: { ...entry.accounting },
       name: sanitizeDisplayText(entry.name),
       value: sanitizeDisplayText(entry.value),
       group: sanitizeOptionalDisplayText(entry.group),
@@ -58,6 +59,7 @@ export function sanitizeQuotaToastEntry(entry: QuotaToastEntry): QuotaToastEntry
 
   return {
     ...entry,
+    accounting: { ...entry.accounting },
     name: sanitizeDisplayText(entry.name),
     group: sanitizeOptionalDisplayText(entry.group),
     label: sanitizeOptionalDisplayText(entry.label),
@@ -78,12 +80,37 @@ export function sanitizeQuotaProviderResult(result: QuotaProviderResult): QuotaP
     attempted: result.attempted,
     entries: result.entries.map(sanitizeQuotaToastEntry),
     errors: result.errors.map(sanitizeQuotaToastError),
+    ...(result.diagnostics
+      ? {
+          diagnostics: result.diagnostics.map((diagnostic) => ({
+            ...diagnostic,
+            modelIds: diagnostic.modelIds ? [...diagnostic.modelIds] : null,
+            checkedPaths: [...diagnostic.checkedPaths],
+            authPaths: [...diagnostic.authPaths],
+          })),
+        }
+      : {}),
+    ...(result.statusDetails
+      ? {
+          statusDetails: result.statusDetails.map((detail) => ({
+            key: sanitizeDisplayText(detail.key),
+            value: sanitizeDisplayText(detail.value),
+          })),
+        }
+      : {}),
+    ...(result.rawDetails
+      ? {
+          rawDetails: result.rawDetails.map((detail) => ({
+            key: sanitizeDisplayText(detail.key),
+            value: sanitizeDisplayText(detail.value),
+          })),
+        }
+      : {}),
+    ...(result.presentation ? { presentation: { ...result.presentation } } : {}),
   };
 }
 
-export function sanitizeSessionTokensData(
-  data?: SessionTokensData,
-): SessionTokensData | undefined {
+export function sanitizeSessionTokensData(data?: SessionTokensData): SessionTokensData | undefined {
   if (!data) return undefined;
 
   return {

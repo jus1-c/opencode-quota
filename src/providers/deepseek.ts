@@ -5,35 +5,41 @@
  * account balance as a value entry.
  */
 
+import {
+  formatDeepSeekBalanceValue,
+  getDeepSeekKeyDiagnostics,
+  hasDeepSeekApiKeyConfigured,
+  queryDeepSeekBalance,
+} from "../lib/deepseek.js";
 import type {
   QuotaProvider,
   QuotaProviderContext,
   QuotaProviderResult,
   QuotaToastEntry,
 } from "../lib/entries.js";
-import {
-  formatDeepSeekBalanceValue,
-  hasDeepSeekApiKeyConfigured,
-  queryDeepSeekBalance,
-} from "../lib/deepseek.js";
 import { isCanonicalProviderAvailable } from "../lib/provider-availability.js";
 import { modelProviderIncludesAny } from "../lib/provider-model-matching.js";
 import {
   attemptedResult,
   mapNullableProviderResult,
+  simpleApiKeyStatusDetails,
+  withStatusDetails,
 } from "./result-helpers.js";
 
 function buildDeepSeekEntries(
-  result: Extract<
-    NonNullable<Awaited<ReturnType<typeof queryDeepSeekBalance>>>,
-    { success: true }
-  >,
+  result: Extract<NonNullable<Awaited<ReturnType<typeof queryDeepSeekBalance>>>, { success: true }>,
 ): QuotaToastEntry[] {
   const entries: QuotaToastEntry[] = [];
 
   for (const info of result.balanceInfos) {
     entries.push({
       kind: "value",
+      accounting: {
+        resultType: "balance",
+        acquisitionMethod: "remote_api",
+        ownership: "maintained",
+        authority: "provider_reported",
+      },
       name: "DeepSeek Balance",
       group: "DeepSeek",
       label: "Balance:",
@@ -48,6 +54,12 @@ function buildDeepSeekEntries(
   if (entries.length === 0) {
     entries.push({
       kind: "value",
+      accounting: {
+        resultType: "status",
+        acquisitionMethod: "remote_api",
+        ownership: "maintained",
+        authority: "provider_reported",
+      },
       name: "DeepSeek",
       group: "DeepSeek",
       label: "Status:",
@@ -78,11 +90,17 @@ export const deepseekProvider: QuotaProvider = {
   },
 
   async fetch(ctx: QuotaProviderContext): Promise<QuotaProviderResult> {
+    const diagnostics = await getDeepSeekKeyDiagnostics().catch(() => ({
+      configured: false,
+      source: null,
+      checkedPaths: [],
+      authPaths: [],
+    }));
     const result = await queryDeepSeekBalance({ requestTimeoutMs: ctx.config?.requestTimeoutMs });
-
-    return mapNullableProviderResult(result, {
+    const providerResult = mapNullableProviderResult(result, {
       errorLabel: "DeepSeek",
       onSuccess: (result) => attemptedResult(buildDeepSeekEntries(result)),
     });
+    return withStatusDetails(providerResult, simpleApiKeyStatusDetails(diagnostics));
   },
 };

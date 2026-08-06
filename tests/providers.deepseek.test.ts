@@ -1,15 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
-
+import { deepseekProvider } from "../src/providers/deepseek.js";
 import {
   expectAttemptedWithErrorLabel,
   expectAttemptedWithNoErrors,
   expectNotAttempted,
+  visibleEntries,
 } from "./helpers/provider-assertions.js";
-import { deepseekProvider } from "../src/providers/deepseek.js";
 
 vi.mock("../src/lib/deepseek.js", () => ({
   queryDeepSeekBalance: vi.fn(),
   hasDeepSeekApiKeyConfigured: vi.fn(),
+  getDeepSeekKeyDiagnostics: vi.fn(async () => ({
+    configured: false,
+    source: null,
+    checkedPaths: [],
+    authPaths: [],
+  })),
   formatDeepSeekBalanceValue: vi.fn(
     (balance: { currency: "CNY" | "USD"; totalBalance: string }) =>
       `${balance.currency === "CNY" ? "¥" : "$"}${balance.totalBalance}`,
@@ -53,7 +59,7 @@ describe("deepseek provider", () => {
     const out = await deepseekProvider.fetch({ config: { requestTimeoutMs: 9000 } } as any);
     expectAttemptedWithNoErrors(out);
     expect(queryDeepSeekBalance).toHaveBeenCalledWith({ requestTimeoutMs: 9000 });
-    expect(out.entries).toEqual([
+    expect(visibleEntries(out.entries, "deepseek")).toEqual([
       {
         kind: "value",
         name: "DeepSeek Balance",
@@ -81,7 +87,7 @@ describe("deepseek provider", () => {
 
     const out = await deepseekProvider.fetch({ config: {} } as any);
     expectAttemptedWithNoErrors(out);
-    expect(out.entries).toEqual([
+    expect(visibleEntries(out.entries, "deepseek")).toEqual([
       {
         kind: "value",
         name: "DeepSeek",

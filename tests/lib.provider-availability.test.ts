@@ -5,6 +5,7 @@ import {
   isCanonicalProviderAvailable,
   isCanonicalProviderWithModelsAvailable,
 } from "../src/lib/provider-availability.js";
+import { createRuntimeProviderIdResolver } from "../src/lib/runtime-provider-ids.js";
 
 function makeCtx(params: {
   ids?: string[];
@@ -17,12 +18,15 @@ function makeCtx(params: {
         data: { providers: params.providers ?? (params.ids ?? []).map((id) => ({ id })) },
       });
 
-  return {
-    client: {
-      config: {
-        providers,
-      },
+  const client = {
+    config: {
+      providers,
     },
+  } as any;
+
+  return {
+    client,
+    resolveRuntimeProviderIds: createRuntimeProviderIdResolver(client),
   } as any;
 }
 
@@ -90,6 +94,21 @@ describe("provider availability", () => {
         fallbackOnError: false,
       }),
     ).resolves.toBe(true);
+    for (const runtimeId of [
+      "google-gemini-cli",
+      "gemini-cli",
+      "gemini",
+      "opencode-gemini-auth",
+      "google",
+    ]) {
+      await expect(
+        isCanonicalProviderAvailable({
+          ctx: makeCtx({ ids: [runtimeId] }),
+          providerId: "google-gemini-cli",
+          fallbackOnError: false,
+        }),
+      ).resolves.toBe(true);
+    }
     await expect(
       isCanonicalProviderAvailable({
         ctx: makeCtx({ ids: ["minimax"] }),
@@ -108,6 +127,27 @@ describe("provider availability", () => {
       isCanonicalProviderAvailable({
         ctx: makeCtx({ ids: ["minimax"] }),
         providerId: "minimax-china-coding-plan",
+        fallbackOnError: false,
+      }),
+    ).resolves.toBe(false);
+    for (const runtimeId of [
+      "xiaomi",
+      "xiaomi-token-plan-cn",
+      "xiaomi-token-plan-ams",
+      "xiaomi-token-plan-sgp",
+    ]) {
+      await expect(
+        isCanonicalProviderAvailable({
+          ctx: makeCtx({ ids: [runtimeId] }),
+          providerId: "xiaomi",
+          fallbackOnError: false,
+        }),
+      ).resolves.toBe(true);
+    }
+    await expect(
+      isCanonicalProviderAvailable({
+        ctx: makeCtx({ ids: ["mimo"] }),
+        providerId: "xiaomi",
         fallbackOnError: false,
       }),
     ).resolves.toBe(false);
@@ -150,19 +190,57 @@ describe("provider availability", () => {
     ).resolves.toBe(true);
   });
 
+  it("reuses one runtime-provider snapshot across concurrent availability checks", async () => {
+    const ctx = makeCtx({ ids: ["copilot", "openai"] });
+
+    await expect(
+      Promise.all([
+        isCanonicalProviderAvailable({
+          ctx,
+          providerId: "copilot",
+          fallbackOnError: false,
+        }),
+        isCanonicalProviderAvailable({
+          ctx,
+          providerId: "openai",
+          fallbackOnError: false,
+        }),
+      ]),
+    ).resolves.toEqual([true, true]);
+
+    expect(ctx.client.config.providers).toHaveBeenCalledOnce();
+  });
+
+  it("shares a rejected lookup while preserving each caller's fallback policy", async () => {
+    const ctx = makeCtx({ error: new Error("boom") });
+
+    await expect(
+      Promise.all([
+        isCanonicalProviderAvailable({
+          ctx,
+          providerId: "copilot",
+          fallbackOnError: false,
+        }),
+        isCanonicalProviderAvailable({
+          ctx,
+          providerId: "openai",
+          fallbackOnError: true,
+        }),
+      ]),
+    ).resolves.toEqual([false, true]);
+    expect(ctx.client.config.providers).toHaveBeenCalledOnce();
+  });
+
   it.each([
     [false, false],
     [true, true],
-  ])(
-    "returns fallbackOnError=%s when provider lookup throws",
-    async (fallbackOnError, expected) => {
-      await expect(
-        isCanonicalProviderAvailable({
-          ctx: makeCtx({ error: new Error("boom") }),
-          providerId: "copilot",
-          fallbackOnError,
-        }),
-      ).resolves.toBe(expected);
-    },
-  );
+  ])("returns fallbackOnError=%s when provider lookup throws", async (fallbackOnError, expected) => {
+    await expect(
+      isCanonicalProviderAvailable({
+        ctx: makeCtx({ error: new Error("boom") }),
+        providerId: "copilot",
+        fallbackOnError,
+      }),
+    ).resolves.toBe(expected);
+  });
 });

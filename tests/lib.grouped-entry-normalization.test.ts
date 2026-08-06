@@ -1,11 +1,20 @@
 import { describe, expect, it } from "vitest";
-
 import {
   groupQuotaEntries,
   normalizeGroupedQuotaEntries,
 } from "../src/lib/grouped-entry-normalization.js";
+import { accountingContractResult } from "./fixtures/accounting-contract.js";
 
 describe("normalizeGroupedQuotaEntries", () => {
+  it("preserves accounting metadata while grouping and sorting", () => {
+    const entries = accountingContractResult.entries.slice(0, 2);
+    const normalized = normalizeGroupedQuotaEntries(entries, "toast");
+
+    expect(normalized.map((entry) => entry.accounting)).toEqual(
+      entries.map((entry) => entry.accounting),
+    );
+  });
+
   it("applies the Google fallback label only for /quota rendering", () => {
     const entry = {
       name: "Claude (acct)",
@@ -16,7 +25,7 @@ describe("normalizeGroupedQuotaEntries", () => {
     expect(normalizeGroupedQuotaEntries([entry], "quota")).toEqual([
       {
         ...entry,
-        group: "Google Antigravity (acct)",
+        group: "[Antigravity (acct)]",
         label: "Claude:",
       },
     ]);
@@ -24,7 +33,7 @@ describe("normalizeGroupedQuotaEntries", () => {
     expect(normalizeGroupedQuotaEntries([entry], "toast")).toEqual([
       {
         ...entry,
-        group: "Google Antigravity (acct)",
+        group: "[Antigravity (acct)]",
       },
     ]);
   });
@@ -55,6 +64,30 @@ describe("normalizeGroupedQuotaEntries", () => {
       "RPM:",
       "Daily:",
       "Monthly:",
+    ]);
+  });
+
+  it("uses an explicit row priority before generic duration ordering", () => {
+    const entries = [
+      {
+        name: "Example 5h",
+        group: "Example",
+        label: "5h:",
+        sortPriority: 1,
+        percentRemaining: 80,
+      },
+      {
+        name: "Example Weekly",
+        group: "Example",
+        label: "Weekly:",
+        sortPriority: 0,
+        percentRemaining: 90,
+      },
+    ];
+
+    expect(normalizeGroupedQuotaEntries(entries, "toast").map((entry) => entry.label)).toEqual([
+      "Weekly:",
+      "5h:",
     ]);
   });
 

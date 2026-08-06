@@ -14,6 +14,7 @@ pnpm-debug.log*
 *.tsbuildinfo
 coverage/
 .pnpm-store/
+/package-artifacts/
 
 # Local-only config/secrets
 .env
@@ -30,8 +31,11 @@ references/*
 docs/*
 !docs/readme/
 !docs/readme/**
+/docs/readme/v4-release-readiness.md
+/docs/adr/
 AGENTS.md
 /.agents
 /prompt-exports
 /opencode-quota
 /images
+/local-live-tests/google-agy/

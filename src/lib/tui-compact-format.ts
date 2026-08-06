@@ -1,12 +1,11 @@
-import type { QuotaRenderData } from "./quota-render-data.js";
-import type { QuotaToastConfig } from "./types.js";
+import { sanitizeQuotaRenderData, sanitizeSingleLineDisplayText } from "./display-sanitize.js";
 import type { QuotaToastEntry, QuotaToastError } from "./entries.js";
-
 import { isValueEntry } from "./entries.js";
 import { formatDisplayedPercentLabel } from "./format-utils.js";
-import { sanitizeQuotaRenderData, sanitizeSingleLineDisplayText } from "./display-sanitize.js";
-import { extractSingleWindowWindowLabel } from "./quota-entry-display.js";
 import { formatGroupedHeader } from "./grouped-header-format.js";
+import { extractSingleWindowWindowLabel } from "./quota-entry-display.js";
+import type { QuotaRenderData } from "./quota-render-data.js";
+import type { QuotaToastConfig } from "./types.js";
 
 const COMPACT_SEGMENT_SEPARATOR = " | ";
 const COMPACT_WINDOW_SEPARATOR = ", ";
@@ -44,15 +43,20 @@ function formatCompactDisplayName(name: string): string {
 
 function formatCompactProviderLabel(name: string): string {
   const compactName = formatCompactDisplayName(name);
-  const withoutParentheticalPunctuation = compactName.replace(/\(([^)]*)\)/gu, (_match, inner: string) => {
-    const normalized = inner.trim();
-    if (!normalized) return "";
-    if (/^personal$/iu.test(normalized)) return "";
-    if (/^pro$/iu.test(normalized)) return " Pro";
-    return ` ${normalized}`;
-  });
+  const withoutParentheticalPunctuation = compactName.replace(
+    /\(([^)]*)\)/gu,
+    (_match, inner: string) => {
+      const normalized = inner.trim();
+      if (!normalized) return "";
+      if (/^personal$/iu.test(normalized)) return "";
+      if (/^pro$/iu.test(normalized)) return " Pro";
+      return ` (${normalized})`;
+    },
+  );
 
-  return compactText(withoutParentheticalPunctuation).replace(/\s{2,}/gu, " ").trim();
+  return compactText(withoutParentheticalPunctuation)
+    .replace(/\s{2,}/gu, " ")
+    .trim();
 }
 
 function formatWindowLabel(label: string): string {
@@ -76,13 +80,13 @@ function getProviderName(entry: QuotaToastEntry): string {
   return formatCompactProviderLabel(entry.name);
 }
 
-function getWindowLabel(entry: QuotaToastEntry): string | null {
+function getWindowLabel(entry: QuotaToastEntry): { text: string; isWindow: boolean } | null {
   const windowLabel =
     extractSingleWindowWindowLabel(entry.label ?? "") ?? extractSingleWindowWindowLabel(entry.name);
-  if (windowLabel) return formatWindowLabel(windowLabel);
+  if (windowLabel) return { text: formatWindowLabel(windowLabel), isWindow: true };
 
   const explicitLabel = entry.label?.trim().replace(/:+$/u, "").trim();
-  return explicitLabel ? compactText(explicitLabel) : null;
+  return explicitLabel ? { text: compactText(explicitLabel), isWindow: false } : null;
 }
 
 function formatCompactValueEntrySegment(
@@ -96,7 +100,7 @@ function formatCompactValueEntrySegment(
 
 type CompactPercentGroup = {
   provider: string;
-  windows: Array<{ label: string | null; percent: string }>;
+  windows: Array<{ label: string | null; percent: string; isWindow: boolean }>;
 };
 
 type PendingCompactSegment = { kind: "percent"; key: string } | { kind: "value"; segment: string };
@@ -107,12 +111,15 @@ function formatCompactPercentGroupSegment(group: CompactPercentGroup): string | 
 
   const summary =
     windows.length === 1
-      ? windows[0]!.percent
+      ? windows[0]!.label && !windows[0]!.isWindow
+        ? `${windows[0]!.label} ${windows[0]!.percent}`
+        : windows[0]!.percent
       : windows
           .map((window) => (window.label ? `${window.label} ${window.percent}` : window.percent))
           .join(COMPACT_WINDOW_SEPARATOR);
 
-  return compactText(`${group.provider} ${summary}`);
+  const separator = windows.every((window) => window.label && !window.isWindow) ? ": " : " ";
+  return compactText(`${group.provider}${separator}${summary}`);
 }
 
 function formatCompactEntrySegments(params: {
@@ -141,7 +148,11 @@ function formatCompactEntrySegments(params: {
       pendingSegments.push({ kind: "percent", key });
     }
 
-    group.windows.push({ label, percent });
+    group.windows.push({
+      label: label?.text ?? null,
+      percent,
+      isWindow: label?.isWindow ?? false,
+    });
   }
 
   return pendingSegments
@@ -176,14 +187,13 @@ function formatCompactSessionTokensSegment(data: QuotaRenderData): string | null
   if (!hasTokenData) return null;
 
   const totalCached = sessionTokens.totalCachedInput ?? 0;
-  const inputSegment = totalCached > 0
-    ? `${formatCompactTokenCount(sessionTokens.totalInput)} (${formatCompactTokenCount(totalCached)})`
-    : formatCompactTokenCount(sessionTokens.totalInput);
+  const inputSegment =
+    totalCached > 0
+      ? `${formatCompactTokenCount(sessionTokens.totalInput)} (${formatCompactTokenCount(totalCached)})`
+      : formatCompactTokenCount(sessionTokens.totalInput);
 
   return compactText(
-    `tok ${inputSegment} in / ${formatCompactTokenCount(
-      sessionTokens.totalOutput,
-    )} out`,
+    `tok ${inputSegment} in / ${formatCompactTokenCount(sessionTokens.totalOutput)} out`,
   );
 }
 

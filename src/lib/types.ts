@@ -4,6 +4,7 @@
 
 import type { QuotaFormatStyle } from "./quota-format-style.js";
 import { DEFAULT_QUOTA_FORMAT_STYLE } from "./quota-format-style.js";
+import type { QuotaProviderDefinition } from "./quota-providers.js";
 
 // =============================================================================
 // Configuration Types
@@ -17,13 +18,11 @@ export type GeminiCliAuthSourceKey =
   | "opencode-gemini-auth"
   | "gemini"
   | "google";
-export type GoogleAgyAuthSourceKey =
-  | "google-agy"
-  | "opencode-agy-auth"
-  | "google-agy-auth";
+export type GoogleAgyAuthSourceKey = "google-agy" | "opencode-agy-auth" | "google-agy-auth";
 export type CursorQuotaPlan = "none" | "pro" | "pro-plus" | "ultra";
 export type PricingSnapshotSource = "auto" | "bundled" | "runtime";
 export type PercentDisplayMode = "remaining" | "used";
+export type SessionTokenScope = "current" | "tree";
 export type OpenCodeGoWindowKey = "rolling" | "weekly" | "monthly";
 
 export interface PricingSnapshotConfig {
@@ -58,10 +57,17 @@ export interface QuotaExportConfig {
   path: string;
 }
 
+export interface QuotaTelemetryConfig {
+  /** Whether to publish quota gauges through the global OpenTelemetry MeterProvider. */
+  enabled: boolean;
+}
+
 export interface MaintainerAnnouncementsConfig {
   enabled: boolean;
   home: boolean;
 }
+
+export type TuiCommandDisplay = "inline" | "dialog";
 
 /** Request timeout in milliseconds */
 export const REQUEST_TIMEOUT_MS = 5000;
@@ -72,6 +78,9 @@ export interface QuotaToastConfig {
 
   /** If false, never show popup toasts (commands/tools still work). */
   enableToast: boolean;
+
+  /** Where deterministic native TUI command output appears. */
+  tuiCommandDisplay: TuiCommandDisplay;
 
   /**
    * Shared quota-row formatting style for popup toasts and the TUI sidebar.
@@ -85,6 +94,11 @@ export interface QuotaToastConfig {
   formatStyle: QuotaFormatStyle;
   /** Shared percent meaning for popup toasts and the TUI sidebar. */
   percentDisplayMode: PercentDisplayMode;
+  /**
+   * Decimal places for compact reset countdown labels.
+   * Unset preserves the default integer-day and half-hour-step display.
+   */
+  resetTimeDecimals?: number;
   minIntervalMs: number;
 
   /** Request timeout in milliseconds for remote provider API calls. */
@@ -110,17 +124,24 @@ export interface QuotaToastConfig {
    */
   enabledProviders: string[] | "auto";
 
+  /**
+   * Ordered global-only remote accounting and local-estimate definitions.
+   * Executed by the single explicit quota-providers aggregate provider.
+   */
+  quotaProviders: QuotaProviderDefinition[];
+
   /** Path or command name for the local Claude CLI used by Anthropic probing. */
   anthropicBinaryPath: string;
 
   googleModels: GoogleModelId[];
-  alibabaCodingPlanTier: AlibabaCodingPlanTier;
   cursorPlan: CursorQuotaPlan;
   /**
    * Which OpenCode Go usage windows to display.
    * Defaults to ["rolling", "weekly", "monthly"].
    */
   opencodeGoWindows: OpenCodeGoWindowKey[];
+  /** Optional OpenCode Zen monthly budget override in USD. */
+  opencodeMonthlyLimit?: number;
   cursorIncludedApiUsd?: number;
   cursorBillingCycleStartDay?: number;
   pricingSnapshot: PricingSnapshotConfig;
@@ -142,6 +163,9 @@ export interface QuotaToastConfig {
    */
   showSessionTokens: boolean;
 
+  /** Sessions included in the displayed session input/output token totals. */
+  sessionTokenScope: SessionTokenScope;
+
   /** TUI sidebar panel visibility when the TUI plugin is installed. */
   tuiSidebarPanel: TuiSidebarPanelConfig;
 
@@ -153,6 +177,9 @@ export interface QuotaToastConfig {
 
   /** Opt-in periodic JSON export for external tool consumption. */
   export: QuotaExportConfig;
+
+  /** Opt-in quota metrics through the host's global OpenTelemetry MeterProvider. */
+  telemetry: QuotaTelemetryConfig;
 
   /** Responsive toast layout breakpoints (not used by the fixed-width TUI sidebar). */
   layout: {
@@ -170,6 +197,7 @@ export const DEFAULT_CONFIG: QuotaToastConfig = {
   enabled: true,
 
   enableToast: true,
+  tuiCommandDisplay: "inline",
   formatStyle: DEFAULT_QUOTA_FORMAT_STYLE,
   percentDisplayMode: "remaining",
   minIntervalMs: 300000, // 5 minutes
@@ -179,14 +207,15 @@ export const DEFAULT_CONFIG: QuotaToastConfig = {
 
   // Providers are auto-detected by default; set to explicit list to opt-in manually.
   enabledProviders: "auto" as const,
+  quotaProviders: [],
 
   anthropicBinaryPath: "claude",
 
   // If Google Antigravity is enabled, default to Claude only.
   googleModels: ["CLAUDE"],
-  alibabaCodingPlanTier: "lite",
   cursorPlan: "none",
   opencodeGoWindows: ["rolling", "weekly", "monthly"],
+  opencodeMonthlyLimit: undefined,
   pricingSnapshot: {
     source: "auto",
     autoRefresh: 7,
@@ -199,6 +228,7 @@ export const DEFAULT_CONFIG: QuotaToastConfig = {
   toastDurationMs: 9000,
   onlyCurrentModel: false,
   showSessionTokens: true,
+  sessionTokenScope: "current",
   tuiSidebarPanel: {
     enabled: true,
   },
@@ -217,6 +247,9 @@ export const DEFAULT_CONFIG: QuotaToastConfig = {
     enabled: false,
     path: "",
   },
+  telemetry: {
+    enabled: false,
+  },
   layout: {
     maxWidth: 50,
     narrowAt: 42,
@@ -234,6 +267,8 @@ export interface CopilotAuthData {
   refresh?: string;
   access?: string;
   expires?: number;
+  /** OpenCode-managed GitHub Enterprise Cloud hostname for this OAuth credential. */
+  enterpriseUrl?: string;
 }
 
 export type AlibabaCodingPlanTier = "lite" | "pro";
@@ -262,6 +297,14 @@ export interface OpenAIOAuthData {
   refresh?: string;
   expires?: number;
   accountId?: string;
+  [key: string]: unknown;
+}
+
+export interface XaiOAuthData {
+  type: string;
+  access?: string;
+  refresh?: string;
+  expires?: number;
   [key: string]: unknown;
 }
 
@@ -306,6 +349,12 @@ export interface LlmGateAuthData {
   metadata?: Record<string, string>;
 }
 
+export interface VilaoAuthData {
+  type: "api";
+  key: string;
+  metadata?: Record<string, string>;
+}
+
 export interface SyntheticAuthData {
   type: "api";
   key: string;
@@ -319,9 +368,11 @@ export interface MiniMaxAuthData {
 
 /**
  * Copilot subscription tier.
- * See: https://docs.github.com/en/copilot/about-github-copilot/subscription-plans-for-github-copilot
+ * See: https://docs.github.com/en/copilot/get-started/plans
  */
-export type CopilotTier = "free" | "pro" | "pro+" | "business" | "enterprise";
+export type CopilotTier = "free" | "student" | "pro" | "pro+" | "max" | "business" | "enterprise";
+
+export type CopilotBillingModel = "ai_credits" | "legacy_premium_requests";
 
 /**
  * Copilot quota token configuration.
@@ -331,32 +382,36 @@ export type CopilotTier = "free" | "pro" | "pro+" | "business" | "enterprise";
  *   `.../opencode/copilot-quota-token.json`
  *   (for example `$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`)
  *
- * Users can create a fine-grained PAT with "Plan" read permission
- * to enable quota checking via GitHub's public billing API.
+ * Credential type and permission depend on whether GitHub bills the
+ * personal account, organization, or enterprise.
  */
 export interface CopilotQuotaConfig {
-  /** Fine-grained PAT with GitHub billing-report access */
+  /** GitHub token with the billing-report permission required by the selected scope. */
   token: string;
+  /** Current AI Credits by default; legacy PRUs are limited to eligible Pro/Pro+ annual plans. */
+  billingModel?: CopilotBillingModel;
   /** Optional user login override for user-scoped reports or org user filtering */
   username?: string;
   /**
    * Optional organization slug.
    *
    * In business mode, this selects
-   * `/organizations/{org}/settings/billing/premium_request/usage`.
+   * `/organizations/{org}/settings/billing/ai_credit/usage`.
    *
    * In enterprise mode with an explicit `enterprise` slug, this becomes the
    * optional `organization` query filter on the enterprise usage report.
    */
   organization?: string;
   /**
-   * Optional enterprise slug for enterprise-scoped premium request reports.
+   * Optional enterprise slug for enterprise-scoped AI Credit reports.
    *
    * When present, the plugin queries
-   * `/enterprises/{enterprise}/settings/billing/premium_request/usage`.
+   * `/enterprises/{enterprise}/settings/billing/ai_credit/usage`.
    */
   enterprise?: string;
-  /** Copilot subscription tier (used for personal-tier fallback quota math) */
+  /** Optional GitHub Enterprise Cloud hostname or host-only HTTPS URL for this token. */
+  enterpriseUrl?: string;
+  /** Copilot subscription tier and billing scope. */
   tier: CopilotTier;
 }
 
@@ -392,6 +447,7 @@ export interface AuthData {
   "nano-gpt"?: NanoGptAuthData;
   deepseek?: DeepSeekAuthData;
   llmgate?: LlmGateAuthData;
+  vilao?: VilaoAuthData;
   cursor?: CursorOAuthAuthData;
   // Canonical OpenCode provider id used by the Qwen auth plugin.
   "qwen-code"?: QwenOAuthAuthData;
@@ -412,6 +468,7 @@ export interface AuthData {
   "minimax-cn-coding-plan"?: MiniMaxAuthData;
   "kimi-code"?: KimiAuthData;
   kimi?: KimiAuthData;
+  xai?: XaiOAuthData;
 }
 
 // =============================================================================
@@ -539,18 +596,49 @@ export interface ZaiQuotaResult {
 // Quota Result Types
 // =============================================================================
 
-/** Result from fetching per-user Copilot quota */
+export type CopilotResultAuthority = "provider_reported" | "locally_derived";
+
+export interface CopilotBudgetResult {
+  amountUsd: number;
+  spentUsd?: number;
+  scope: string;
+  percentRemaining?: number;
+  authority: CopilotResultAuthority;
+}
+
+/** Result from fetching per-user Copilot accounting. */
 export interface CopilotQuotaResult {
   success: true;
   mode: "user_quota";
+  unit: "ai_credits" | "premium_interactions" | "premium_requests";
   used: number;
-  total: number;
-  percentRemaining: number;
+  authority: CopilotResultAuthority;
+  period?: {
+    year: number;
+    month: number;
+  };
+  total?: number;
+  percentRemaining?: number;
+  includedUsed?: number;
+  billedUsed?: number;
+  billedAmountUsd?: number;
+  budget?: CopilotBudgetResult;
+  plan?: string;
   unlimited?: boolean;
+  warnings?: string[];
   resetTimeIso?: string;
 }
 
-/** Result from fetching organization-scoped Copilot premium usage */
+/** Plan-only result when Copilot returns token-billing placeholder quota data. */
+export interface CopilotPlanResult {
+  success: true;
+  mode: "user_plan";
+  authority: CopilotResultAuthority;
+  plan?: string;
+  resetTimeIso?: string;
+}
+
+/** Result from fetching organization-scoped Copilot AI Credit usage. */
 export interface CopilotOrganizationUsageResult {
   success: true;
   mode: "organization_usage";
@@ -560,11 +648,18 @@ export interface CopilotOrganizationUsageResult {
     year: number;
     month: number;
   };
+  unit: "ai_credits";
   used: number;
+  authority: CopilotResultAuthority;
+  includedUsed: number;
+  billedUsed: number;
+  billedAmountUsd?: number;
+  budget?: CopilotBudgetResult;
+  warnings?: string[];
   resetTimeIso?: string;
 }
 
-/** Result from fetching enterprise-scoped Copilot premium usage */
+/** Result from fetching enterprise-scoped Copilot AI Credit usage. */
 export interface CopilotEnterpriseUsageResult {
   success: true;
   mode: "enterprise_usage";
@@ -575,7 +670,14 @@ export interface CopilotEnterpriseUsageResult {
     year: number;
     month: number;
   };
+  unit: "ai_credits";
   used: number;
+  authority: CopilotResultAuthority;
+  includedUsed: number;
+  billedUsed: number;
+  billedAmountUsd?: number;
+  budget?: CopilotBudgetResult;
+  warnings?: string[];
   resetTimeIso?: string;
 }
 
@@ -611,16 +713,44 @@ export interface GeminiCliQuotaResult {
   errors?: GoogleAccountError[];
 }
 
+export interface GoogleAgyQuotaSummaryBucket {
+  bucketId?: string;
+  displayName?: string;
+  description?: string;
+  window?: string;
+  remaining?: string;
+  remainingFraction?: number;
+  remainingAmount?: string;
+  disabled?: boolean;
+  resetTime?: string;
+}
+
+export interface GoogleAgyQuotaSummaryGroup {
+  displayName?: string;
+  description?: string;
+  buckets?: GoogleAgyQuotaSummaryBucket[];
+}
+
+export interface GoogleAgyQuotaSummaryResponse {
+  groups?: GoogleAgyQuotaSummaryGroup[];
+  buckets?: GoogleAgyQuotaSummaryBucket[];
+  description?: string;
+}
+
 export interface GoogleAgyQuotaBucket {
-  modelId: string;
-  displayName: string;
+  family: string;
+  window: "weekly" | "five_hour";
+  windowLabel: "Weekly" | "5h";
+  bucketId?: string;
+  bucketLabel?: string;
+  remainingFraction: number;
   percentRemaining: number;
   resetTimeIso?: string;
   remainingAmount?: string;
-  tokenType?: string;
   accountEmail?: string;
-  accountKey?: string;
-  sourceKey?: GoogleAgyAuthSourceKey;
+  accountKey: string;
+  accountIndex: number;
+  sourceKey: GoogleAgyAuthSourceKey;
 }
 
 export interface GoogleAgyQuotaResult {
@@ -647,6 +777,7 @@ export interface QuotaError {
 /** Combined quota result */
 export type CopilotResult =
   | CopilotQuotaResult
+  | CopilotPlanResult
   | CopilotOrganizationUsageResult
   | CopilotEnterpriseUsageResult
   | QuotaError
@@ -696,17 +827,23 @@ export type SyntheticResult =
   | QuotaError
   | null;
 
-/** Single usage window from Ollama Cloud settings page */
+/** Single usage window from the Ollama Cloud usage API */
 export interface OllamaCloudWindow {
+  /** Provider-reported usage fraction [0..1] */
+  usageFraction: number;
   /** Usage percentage [0..100] */
   usagePercent: number;
   /** Remaining percentage [0..100] */
   percentRemaining: number;
-  /** ISO reset timestamp */
-  resetTimeIso?: string;
 }
 
-/** Result from scraping Ollama Cloud settings page */
+/** Per-model request count from the Ollama Cloud usage API */
+export interface OllamaCloudModelUsage {
+  model: string;
+  requests: number;
+}
+
+/** Result from the Ollama Cloud usage API */
 export type OllamaCloudResult =
   | {
       success: true;
@@ -714,8 +851,10 @@ export type OllamaCloudResult =
       session?: OllamaCloudWindow;
       /** Weekly usage window, when present */
       weekly?: OllamaCloudWindow;
-      /** Plan tier (e.g. "free", "pro") */
-      planTier?: string;
+      /** Valid per-model request counts */
+      models: OllamaCloudModelUsage[];
+      /** Independent response rows that could not be used */
+      rowErrors?: string[];
     }
   | QuotaError
   | null;
@@ -763,17 +902,20 @@ export const GOOGLE_MODEL_KEYS: Record<
 > = {
   G3PRO: {
     key: "gemini-3.1-pro",
-    altKey: "gemini-3.1-pro-high|gemini-3.1-pro-low|gemini-3-pro-high|gemini-3-pro-low|gemini-3.5-pro-high|gemini-3.5-pro-low",
+    altKey:
+      "gemini-3.1-pro-high|gemini-3.1-pro-low|gemini-3-pro-high|gemini-3-pro-low|gemini-3.5-pro-high|gemini-3.5-pro-low",
     display: "G3Pro",
   },
   G3FLASH: {
     key: "gemini-3-flash",
-    altKey: "gemini-3-flash-medium|gemini-3-flash-high|gemini-3-flash-low|gemini-3-5-flash-medium|gemini-3-5-flash-high|gemini-3-5-flash-low|gemini-3.5-flash-medium|gemini-3.5-flash-high|gemini-3.5-flash-low",
+    altKey:
+      "gemini-3-flash-medium|gemini-3-flash-high|gemini-3-flash-low|gemini-3-5-flash-medium|gemini-3-5-flash-high|gemini-3-5-flash-low|gemini-3.5-flash-medium|gemini-3.5-flash-high|gemini-3.5-flash-low",
     display: "G3Flash",
   },
   CLAUDE: {
     key: "claude-opus-4-6-thinking",
-    altKey: "claude-opus-4-5-thinking|claude-opus-4-5|claude-sonnet-4-6|claude-sonnet-4-6-thinking|claude-opus-4-6|gemini-claude-sonnet-4-6|gemini-claude-opus-4-6-thinking",
+    altKey:
+      "claude-opus-4-5-thinking|claude-opus-4-5|claude-sonnet-4-6|claude-sonnet-4-6-thinking|claude-opus-4-6|gemini-claude-sonnet-4-6|gemini-claude-opus-4-6-thinking",
     display: "Claude",
   },
   G3IMAGE: { key: "gemini-3-pro-image", display: "G3Image" },

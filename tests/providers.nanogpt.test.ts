@@ -1,15 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
-
+import { nanoGptProvider } from "../src/providers/nanogpt.js";
 import {
   expectAttemptedWithErrorLabel,
   expectAttemptedWithNoErrors,
   expectNotAttempted,
+  visibleEntries,
 } from "./helpers/provider-assertions.js";
-import { nanoGptProvider } from "../src/providers/nanogpt.js";
 
 vi.mock("../src/lib/nanogpt.js", () => ({
   queryNanoGptQuota: vi.fn(),
   hasNanoGptApiKeyConfigured: vi.fn(),
+  getNanoGptKeyDiagnostics: vi.fn(async () => ({
+    configured: false,
+    source: null,
+    checkedPaths: [],
+    authPaths: [],
+  })),
   formatNanoGptBalanceValue: vi.fn((balance: { usdBalance?: number; nanoBalanceRaw?: string }) => {
     if (typeof balance.usdBalance === "number") {
       return `$${balance.usdBalance.toFixed(2)}`;
@@ -57,7 +63,7 @@ describe("nanogpt provider", () => {
 
     const out = await nanoGptProvider.fetch({ config: {} } as any);
     expectAttemptedWithNoErrors(out);
-    expect(out.entries).toEqual([
+    expect(visibleEntries(out.entries, "nanogpt")).toEqual([
       {
         name: "NanoGPT Daily",
         group: "NanoGPT",
@@ -111,7 +117,7 @@ describe("nanogpt provider", () => {
 
     const out = await nanoGptProvider.fetch({ config: {} } as any);
     expect(out.attempted).toBe(true);
-    expect(out.entries).toEqual([
+    expect(visibleEntries(out.entries, "nanogpt")).toEqual([
       {
         name: "NanoGPT Daily",
         group: "NanoGPT",
@@ -157,7 +163,7 @@ describe("nanogpt provider", () => {
 
     const out = await nanoGptProvider.fetch({ config: {} } as any);
     expectAttemptedWithErrorLabel(out, "NanoGPT");
-    expect(out.entries).toEqual([]);
+    expect(visibleEntries(out.entries, "nanogpt")).toEqual([]);
   });
 
   it("matches NanoGPT model ids", () => {

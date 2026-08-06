@@ -5,7 +5,6 @@
  * Designed to feel like a status dashboard while still respecting OpenCode toast width.
  */
 
-import type { QuotaToastConfig } from "./types.js";
 import type { QuotaToastEntry, QuotaToastError, SessionTokensData } from "./entries.js";
 import { isValueEntry } from "./entries.js";
 import {
@@ -13,43 +12,51 @@ import {
   DISPLAYED_PERCENT_LABEL_WIDTH,
   formatDisplayedPercentLabel,
   formatResetCountdown,
+  isResetTimeDecimals,
   padLeft,
   padRight,
   resolveDisplayedPercent,
 } from "./format-utils.js";
-import { formatGroupedHeader } from "./grouped-header-format.js";
 import { normalizeGroupedQuotaEntries } from "./grouped-entry-normalization.js";
+import { formatGroupedHeader } from "./grouped-header-format.js";
+import { classifyQuotaWindowText, type QuotaWindowKind } from "./quota-entry-display.js";
 import { renderSessionTokensLines } from "./session-tokens-format.js";
+import type { QuotaToastConfig } from "./types.js";
 
 function normalizeLabelText(value?: string): string {
   return value?.trim().replace(/:+$/u, "").trim() ?? "";
 }
 
+const GROUPED_WINDOW_LABELS: Readonly<Record<QuotaWindowKind, string>> = {
+  rpm: "RPM",
+  five_hour: "Five-hour",
+  hour: "Hourly",
+  week: "Weekly",
+  day: "Daily",
+  month: "Monthly",
+  year: "Yearly",
+  mcp: "MCP",
+  code_review: "Code Review",
+};
+
 function extractWindowLabel(text: string): string | null {
-  const lower = normalizeLabelText(text).toLowerCase();
-  if (!lower) return null;
-
-  if (/\b(?:rpm|per minute|minute|minutes)\b/u.test(lower)) return "RPM";
-  if (/\b(?:rolling|5h|5 h|5-hour|5 hour|five-hour|five hour)\b/u.test(lower)) return "5h";
-  if (/\b(?:hourly|1h|1 h|1-hour|1 hour|hour)\b/u.test(lower)) return "Hourly";
-  if (/\b(?:7d|7 d|7-day|7 day|weekly|week)\b/u.test(lower)) return "Weekly";
-  if (/\b(?:daily|1d|1 d|1-day|1 day|day)\b/u.test(lower)) return "Daily";
-  if (/\b(?:monthly|month)\b/u.test(lower)) return "Monthly";
-  if (/\b(?:yearly|annual|annually|year)\b/u.test(lower)) return "Yearly";
-  if (/\bmcp\b/u.test(lower)) return "MCP";
-  if (/\bcode review\b/u.test(lower)) return "Code Review";
-
-  return null;
+  const kind = classifyQuotaWindowText(text);
+  return kind ? GROUPED_WINDOW_LABELS[kind] : null;
 }
 
 function resolveGroupedRowLabel(entry: QuotaToastEntry): string {
   const rawLabel = normalizeLabelText(entry.label);
   const fromLabel = extractWindowLabel(rawLabel);
-  if (fromLabel) return `${fromLabel} window`;
+  if (fromLabel) return fromLabel;
   if (rawLabel) return rawLabel;
 
+  const metricLabel = normalizeLabelText(entry.metricLabel);
+  const fromMetricLabel = extractWindowLabel(metricLabel);
+  if (fromMetricLabel) return fromMetricLabel;
+  if (metricLabel) return metricLabel;
+
   const fromName = extractWindowLabel(entry.name);
-  if (fromName) return `${fromName} window`;
+  if (fromName) return fromName;
 
   return normalizeLabelText(entry.group) || "Quota window";
 }
@@ -63,6 +70,7 @@ export function formatQuotaRowsGrouped(params: {
   entries?: QuotaToastEntry[];
   errors?: QuotaToastError[];
   percentDisplayMode?: QuotaToastConfig["percentDisplayMode"];
+  resetTimeDecimals?: number;
   sessionTokens?: SessionTokensData;
 }): string {
   const layout = params.layout ?? { maxWidth: 50, narrowAt: 42, tinyAt: 32 };
@@ -75,8 +83,9 @@ export function formatQuotaRowsGrouped(params: {
     DISPLAYED_PERCENT_LABEL_WIDTH,
     ...(params.entries ?? [])
       .filter((entry) => !isValueEntry(entry))
-      .map((entry) =>
-        formatDisplayedPercentLabel(entry.percentRemaining, params.percentDisplayMode).length,
+      .map(
+        (entry) =>
+          formatDisplayedPercentLabel(entry.percentRemaining, params.percentDisplayMode).length,
       ),
   );
   const barWidth = Math.max(10, maxWidth - separator.length - percentCol);
@@ -108,20 +117,26 @@ export function formatQuotaRowsGrouped(params: {
 
       if (isValueEntry(entry)) {
         const label = entry.label?.trim() || entry.name;
-        const timeStr = formatResetCountdown(entry.resetTimeIso, { compactRounded: true });
+        const timeStr = formatResetCountdown(entry.resetTimeIso, {
+          compactRounded: true,
+          decimals: params.resetTimeDecimals,
+        });
         const value = entry.value.trim();
 
         if (isTiny) {
           // Tiny: "label  time  value"
+          const timeWidth = isResetTimeDecimals(params.resetTimeDecimals)
+            ? Math.max(timeCol, timeStr.length)
+            : timeCol;
           const valueCol = Math.min(value.length, Math.max(6, percentCol + 2));
           const tinyNameCol = Math.max(
             1,
-            maxWidth - separator.length - timeCol - separator.length - valueCol,
+            maxWidth - separator.length - timeWidth - separator.length - valueCol,
           );
           const leftText = right ? `${label} ${right}` : label;
           const line = [
             padRight(leftText, tinyNameCol),
-            padLeft(timeStr, timeCol),
+            padLeft(timeStr, timeWidth),
             padLeft(value, valueCol),
           ].join(separator);
           lines.push(line.slice(0, maxWidth));
@@ -137,11 +152,13 @@ export function formatQuotaRowsGrouped(params: {
         );
         const leftText = right ? `${label} ${right}` : label;
         lines.push(
-          (padRight(leftText, leftMax) +
+          (
+            padRight(leftText, leftMax) +
             separator +
             padLeft(value, valueWidth) +
             separator +
-            padLeft(timeStr, timeWidth)).slice(0, maxWidth),
+            padLeft(timeStr, timeWidth)
+          ).slice(0, maxWidth),
         );
         continue;
       }
@@ -153,7 +170,10 @@ export function formatQuotaRowsGrouped(params: {
       // (i.e., any usage at all, or depleted)
       const timeStr =
         entry.percentRemaining < 100
-          ? formatResetCountdown(entry.resetTimeIso, { compactRounded: true })
+          ? formatResetCountdown(entry.resetTimeIso, {
+              compactRounded: true,
+              decimals: params.resetTimeDecimals,
+            })
           : "";
       const displayedPercent = resolveDisplayedPercent(
         entry.percentRemaining,
@@ -166,13 +186,16 @@ export function formatQuotaRowsGrouped(params: {
 
       if (isTiny) {
         // Tiny: "label  time  XX%" (ignore bar)
+        const timeWidth = isResetTimeDecimals(params.resetTimeDecimals)
+          ? Math.max(timeCol, timeStr.length)
+          : timeCol;
         const tinyNameCol = Math.max(
           1,
-          maxWidth - separator.length - timeCol - separator.length - percentCol,
+          maxWidth - separator.length - timeWidth - separator.length - percentCol,
         );
         const line = [
           padRight(label, tinyNameCol),
-          padLeft(timeStr, timeCol),
+          padLeft(timeStr, timeWidth),
           padLeft(percentLabel, percentCol),
         ].join(separator);
         lines.push(line.slice(0, maxWidth));

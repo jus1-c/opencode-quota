@@ -1,13 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  QUOTA_PROVIDER_ID_SYNONYMS,
-  QUOTA_PROVIDER_RUNTIME_IDS,
-  QUOTA_PROVIDER_SHAPES,
   getQuotaProviderDisplayLabel,
   getQuotaProviderRuntimeIds,
   getQuotaProviderShape,
   normalizeQuotaProviderId,
+  QUOTA_PROVIDER_CATALOG,
+  QUOTA_PROVIDER_ID_SYNONYMS,
+  QUOTA_PROVIDER_LABELS,
+  QUOTA_PROVIDER_RUNTIME_IDS,
+  QUOTA_PROVIDER_SHAPES,
 } from "../src/lib/provider-metadata.js";
 
 describe("provider-metadata", () => {
@@ -32,6 +34,22 @@ describe("provider-metadata", () => {
         autoSetup: "yes",
         authentication: "opencode_auth_oauth_token",
         quota: "remote_api",
+      },
+      {
+        id: "openrouter",
+        autoSetup: "yes",
+        authentication: "opencode_auth_api_key",
+        authFallbacks: ["env_api_key", "global_opencode_config"],
+        quota: "remote_api",
+      },
+      {
+        id: "kilo",
+        autoSetup: "usually",
+        authentication: "opencode_auth_api_key",
+        authFallbacks: ["env_api_key", "global_opencode_config"],
+        quota: "remote_api",
+        notes:
+          "Queries Kilo Pass state first, then falls back to the documented personal Gateway balance when no active subscription exists",
       },
       {
         id: "cursor",
@@ -78,6 +96,8 @@ describe("provider-metadata", () => {
       },
       {
         id: "google-gemini-cli",
+        lifecycle: "deprecated",
+        recommendedReplacementId: "google-agy",
         autoSetup: "needs_quick_setup",
         authentication: "companion_auth_oauth_token",
         quota: "remote_api",
@@ -147,6 +167,29 @@ describe("provider-metadata", () => {
         notes: "separate provider caches gateway credential in OS keychain and stores access/refresh tokens in OpenCode auth metadata",
       },
       {
+        id: "vilao",
+        autoSetup: "needs_quick_setup",
+        authentication: "opencode_auth_metadata_token",
+        quota: "remote_api",
+        quickSetupAnchor: "vilao",
+        notes: "pay-as-you-go balance relative to the highest locally observed balance",
+      },
+      {
+        id: "xai",
+        autoSetup: "yes",
+        authentication: "opencode_auth_oauth_token",
+        quota: "remote_api",
+        notes: "SuperGrok OAuth via OpenCode /connect; shared weekly credit meter",
+      },
+      {
+        id: "xiaomi",
+        autoSetup: "needs_quick_setup",
+        authentication: "state_only",
+        quota: "remote_api",
+        quickSetupAnchor: "xiaomi-mimo",
+        notes: "Reads the Xiaomi MiMo dashboard with a filtered trusted cookie",
+      },
+      {
         id: "opencode-go",
         autoSetup: "needs_quick_setup",
         authentication: "state_only",
@@ -155,13 +198,57 @@ describe("provider-metadata", () => {
         notes: "Scrapes the OpenCode Go dashboard; requires workspaceId and authCookie",
       },
       {
-        id: "ollama-cloud",
-        autoSetup: "manual_env_config",
+        id: "opencode",
+        autoSetup: "needs_quick_setup",
         authentication: "state_only",
         quota: "remote_api",
-        notes: "Scrapes the Ollama Cloud settings page; requires __Secure-session cookie via OLLAMA_USAGE_COOKIE env or ollama-usage config",
+        quickSetupAnchor: "opencode-zen",
+        notes: "Scrapes the OpenCode Zen billing page; requires workspaceId and authCookie",
+      },
+      {
+        id: "ollama-cloud",
+        autoSetup: "usually",
+        authentication: "opencode_auth_api_key",
+        authFallbacks: ["env_api_key", "global_opencode_config"],
+        quota: "remote_api",
+        notes:
+          "Queries the Ollama Cloud usage API; reports session and weekly quota plus model request counts",
+      },
+      {
+        id: "quota-providers",
+        autoSetup: "manual_env_config",
+        authentication: "external_api_key",
+        authFallbacks: ["env_api_key", "global_opencode_config"],
+        quota: "remote_api",
+        notes: "Aggregates exact user-configured accounting sources",
       },
     ]);
+  });
+
+  it("derives public metadata views from one canonical catalog", () => {
+    expect(Object.keys(QUOTA_PROVIDER_CATALOG)).toEqual(
+      QUOTA_PROVIDER_SHAPES.map((shape) => shape.id),
+    );
+    for (const [id, entry] of Object.entries(QUOTA_PROVIDER_CATALOG)) {
+      expect(entry.shape.id).toBe(id);
+      expect(QUOTA_PROVIDER_LABELS[id]).toBe(entry.label);
+      expect(QUOTA_PROVIDER_SHAPES.find((shape) => shape.id === id)).toBe(entry.shape);
+      expect(QUOTA_PROVIDER_RUNTIME_IDS[id as keyof typeof QUOTA_PROVIDER_RUNTIME_IDS]).toEqual(
+        entry.runtimeIds,
+      );
+      for (const synonym of entry.synonyms) {
+        expect(QUOTA_PROVIDER_ID_SYNONYMS[synonym]).toBe(id);
+      }
+    }
+  });
+
+  it("preserves direct label aliases from the authored catalog", () => {
+    expect(QUOTA_PROVIDER_LABELS["minimax-cn-coding-plan"]).toBe("MiniMax Coding Plan (CN)");
+    expect(QUOTA_PROVIDER_LABELS["kimi-code"]).toBe("Kimi Code");
+    expect(QUOTA_PROVIDER_CATALOG["minimax-china-coding-plan"].labelAliases).toContain(
+      "minimax-cn-coding-plan",
+    );
+    expect(QUOTA_PROVIDER_CATALOG["kimi-for-coding"].labelAliases).toContain("kimi-code");
   });
 
   it("keeps canonical provider setup ids unique", () => {
@@ -186,6 +273,7 @@ describe("provider-metadata", () => {
     ]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.anthropic).toEqual(["anthropic"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.openai).toEqual(["openai", "chatgpt", "codex"]);
+    expect(QUOTA_PROVIDER_RUNTIME_IDS.kilo).toEqual(["kilo"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.cursor).toEqual(["cursor", "cursor-acp"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.synthetic).toEqual(["synthetic"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.chutes).toEqual(["chutes", "chutes-ai"]);
@@ -231,6 +319,15 @@ describe("provider-metadata", () => {
     ]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.deepseek).toEqual(["deepseek"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.llmgate).toEqual(["llmgate"]);
+    expect(QUOTA_PROVIDER_RUNTIME_IDS.opencode).toEqual(["opencode", "opencode-zen"]);
+    expect(QUOTA_PROVIDER_RUNTIME_IDS.xai).toEqual(["xai"]);
+    expect(QUOTA_PROVIDER_RUNTIME_IDS.xiaomi).toEqual([
+      "xiaomi",
+      "xiaomi-token-plan-cn",
+      "xiaomi-token-plan-ams",
+      "xiaomi-token-plan-sgp",
+    ]);
+    expect(QUOTA_PROVIDER_RUNTIME_IDS["quota-providers"]).toEqual([]);
   });
 
   it("keeps runtime ids distinct from broad normalization aliases", () => {
@@ -242,6 +339,8 @@ describe("provider-metadata", () => {
     ]);
     expect(getQuotaProviderRuntimeIds("claude")).toEqual(["anthropic"]);
     expect(getQuotaProviderRuntimeIds("openai")).toEqual(["openai", "chatgpt", "codex"]);
+    expect(getQuotaProviderRuntimeIds("kilo")).toEqual(["kilo"]);
+    expect(getQuotaProviderRuntimeIds("kilo-gateway")).toEqual([]);
     expect(getQuotaProviderRuntimeIds("open-cursor")).toEqual(["cursor", "cursor-acp"]);
     expect(getQuotaProviderRuntimeIds("google-antigravity")).toEqual([
       "google-antigravity",
@@ -282,6 +381,17 @@ describe("provider-metadata", () => {
     ]);
     expect(getQuotaProviderRuntimeIds("kimi")).toEqual(["kimi-for-coding", "kimi", "kimi-code"]);
     expect(getQuotaProviderRuntimeIds("deep-seek")).toEqual(["deepseek"]);
+    expect(getQuotaProviderRuntimeIds("opencode-zen")).toEqual(["opencode", "opencode-zen"]);
+    expect(getQuotaProviderRuntimeIds("xai")).toEqual(["xai"]);
+    expect(getQuotaProviderRuntimeIds("xiaomi-token-plan-cn")).toEqual([
+      "xiaomi",
+      "xiaomi-token-plan-cn",
+      "xiaomi-token-plan-ams",
+      "xiaomi-token-plan-sgp",
+    ]);
+    expect(getQuotaProviderRuntimeIds("mimo")).toEqual([]);
+    expect(getQuotaProviderRuntimeIds("xiaomi-mimo")).toEqual([]);
+    expect(getQuotaProviderRuntimeIds("grok")).toEqual([]);
     expect(getQuotaProviderRuntimeIds("not-a-provider")).toEqual([]);
   });
 
@@ -308,6 +418,8 @@ describe("provider-metadata", () => {
     });
     expect(getQuotaProviderShape("gemini-cli")).toEqual({
       id: "google-gemini-cli",
+      lifecycle: "deprecated",
+      recommendedReplacementId: "google-agy",
       autoSetup: "needs_quick_setup",
       authentication: "companion_auth_oauth_token",
       quota: "remote_api",
@@ -326,6 +438,38 @@ describe("provider-metadata", () => {
       authentication: "opencode_auth_api_key",
       authFallbacks: ["env_api_key", "global_opencode_config"],
       quota: "remote_api",
+    });
+    expect(getQuotaProviderShape("opencode-zen")).toEqual({
+      id: "opencode",
+      autoSetup: "needs_quick_setup",
+      authentication: "state_only",
+      quota: "remote_api",
+      quickSetupAnchor: "opencode-zen",
+      notes: "Scrapes the OpenCode Zen billing page; requires workspaceId and authCookie",
+    });
+    expect(getQuotaProviderShape("kilo")).toEqual({
+      id: "kilo",
+      autoSetup: "usually",
+      authentication: "opencode_auth_api_key",
+      authFallbacks: ["env_api_key", "global_opencode_config"],
+      quota: "remote_api",
+      notes:
+        "Queries Kilo Pass state first, then falls back to the documented personal Gateway balance when no active subscription exists",
+    });
+    expect(getQuotaProviderShape("xai")).toEqual({
+      id: "xai",
+      autoSetup: "yes",
+      authentication: "opencode_auth_oauth_token",
+      quota: "remote_api",
+      notes: "SuperGrok OAuth via OpenCode /connect; shared weekly credit meter",
+    });
+    expect(getQuotaProviderShape("xiaomi-token-plan-ams")).toEqual({
+      id: "xiaomi",
+      autoSetup: "needs_quick_setup",
+      authentication: "state_only",
+      quota: "remote_api",
+      quickSetupAnchor: "xiaomi-mimo",
+      notes: "Reads the Xiaomi MiMo dashboard with a filtered trusted cookie",
     });
     expect(getQuotaProviderShape("not-a-provider")).toBeUndefined();
   });
@@ -348,6 +492,14 @@ describe("provider-metadata", () => {
     expect(getQuotaProviderDisplayLabel("kimi-code")).toBe("Kimi Code");
     expect(getQuotaProviderDisplayLabel("kimi")).toBe("Kimi Code");
     expect(getQuotaProviderDisplayLabel("deep-seek")).toBe("DeepSeek");
+    expect(getQuotaProviderDisplayLabel("opencode-zen")).toBe("OpenCode Zen");
+    expect(getQuotaProviderDisplayLabel("kilo")).toBe("Kilo Gateway");
+    expect(getQuotaProviderDisplayLabel("xai")).toBe("xAI");
+    expect(getQuotaProviderDisplayLabel("xiaomi")).toBe("Xiaomi MiMo");
+    expect(getQuotaProviderDisplayLabel("xiaomi-token-plan-sgp")).toBe("Xiaomi MiMo");
+    expect(getQuotaProviderDisplayLabel("mimo")).toBe("mimo");
+    expect(getQuotaProviderDisplayLabel("grok")).toBe("grok");
+    expect(getQuotaProviderDisplayLabel("quota-providers")).toBe("Quota providers");
     expect(getQuotaProviderDisplayLabel("something-else")).toBe("something-else");
   });
 });
