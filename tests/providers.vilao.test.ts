@@ -32,7 +32,7 @@ describe("vilao provider", () => {
       {
         name: "Vilao Balance",
         group: "Vilao",
-        label: "40000.00/100000.00 VND",
+        label: ":: 40000.00 / 100000.00 ₫",
         percentRemaining: 40,
       },
     ]);

@@ -48,7 +48,7 @@ export const vilaoProvider: QuotaProvider = {
             },
             name: "Vilao Balance",
             group: "Vilao",
-            label: `${formatVilaoVnd(success.balance).replace(" VND", "")}/${formatVilaoVnd(success.baseline)}`,
+            label: `:: ${formatVilaoVnd(success.balance).replace(" VND", "")} / ${formatVilaoVnd(success.baseline).replace(" VND", "")} ₫`,
             percentRemaining: success.percentRemaining,
           },
         ]),
