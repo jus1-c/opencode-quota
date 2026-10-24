@@ -6,13 +6,15 @@ import type {
   QuotaToastEntry,
 } from "../lib/entries.js";
 import {
+  AGY_AUTH_KEYS,
   hasAgyQuotaRuntimeAvailable,
   inspectAgyAuthPresence,
   queryGoogleAgyQuota,
 } from "../lib/google-agy.js";
 import { inspectAgyCompanionPresence } from "../lib/google-agy-companion.js";
+import { formatCredentialDisplayNames, readCredentialRows } from "../lib/opencode-auth.js";
 import { parseProviderModelRef } from "../lib/provider-model-matching.js";
-import type { GoogleAgyQuotaBucket } from "../lib/types.js";
+import type { AuthData, GoogleAgyQuotaBucket } from "../lib/types.js";
 import {
   createGoogleAccountLabelMap,
   formatGoogleAccountErrors,
@@ -32,7 +34,7 @@ function isAgyModel(model: string): boolean {
 }
 
 function formatAgyAccountLabel(
-  bucket: { accountEmail?: string; accountKey?: string },
+  bucket: { accountEmail?: string; accountIndex: number },
   accountLabels: ReadonlyMap<string, string>,
 ): string {
   if (bucket.accountEmail) {
@@ -41,7 +43,7 @@ function formatAgyAccountLabel(
       formatGoogleAccountLabel(bucket.accountEmail, "domainHint")
     );
   }
-  return bucket.accountKey ? `Account ${bucket.accountKey.slice(0, 8)}` : "Unknown";
+  return `Account ${bucket.accountIndex + 1}`;
 }
 
 function familyRank(family: string): number {
@@ -99,9 +101,20 @@ function formatRemainingAmount(value: string | undefined): string | undefined {
   return `${display} left`;
 }
 
-async function isAgyConfigured(ctx: QuotaProviderContext): Promise<boolean> {
+export function formatAgyCredentialGroup(credentialName: string, familyLabel: string): string {
+  const trimmed = credentialName.trim();
+  if (!familyLabel?.trim()) return trimmed;
+  const match = trimmed.match(/^(\[[^\]]+\])(.*)$/);
+  if (match) {
+    const inside = match[1]?.slice(1, -1) ?? "";
+    return `[${inside}: ${familyLabel}]${match[2] ?? ""}`;
+  }
+  return `[${trimmed}: ${familyLabel}]`;
+}
+
+async function isAgyConfigured(): Promise<boolean> {
   try {
-    return await hasAgyQuotaRuntimeAvailable(ctx.client);
+    return await hasAgyQuotaRuntimeAvailable();
   } catch {
     return false;
   }
@@ -110,8 +123,8 @@ async function isAgyConfigured(ctx: QuotaProviderContext): Promise<boolean> {
 export const googleAgyProvider: QuotaProvider = {
   id: "google-agy",
 
-  async isAvailable(ctx: QuotaProviderContext): Promise<boolean> {
-    return await isAgyConfigured(ctx);
+  async isAvailable(): Promise<boolean> {
+    return await isAgyConfigured();
   },
 
   matchesCurrentModel(model: string): boolean {
@@ -120,7 +133,7 @@ export const googleAgyProvider: QuotaProvider = {
 
   async fetch(ctx: QuotaProviderContext): Promise<QuotaProviderResult> {
     const [auth, companion] = await Promise.all([
-      inspectAgyAuthPresence(ctx.client),
+      inspectAgyAuthPresence(),
       inspectAgyCompanionPresence(),
     ]);
     const statusDetails = statusDetailsFromRecord({
@@ -137,7 +150,68 @@ export const googleAgyProvider: QuotaProvider = {
       companion_error:
         companion.state !== "present" ? sanitizeDisplayText(companion.error) : undefined,
     });
-    const result = await queryGoogleAgyQuota(ctx.client, {
+    const credentialRows = (await readCredentialRows(AGY_AUTH_KEYS, { methods: ["oauth"] })).filter(
+      (row) => ["google-agy", "opencode-agy-auth", "google-agy-auth"].includes(row.integrationId),
+    );
+    if (credentialRows.length > 0) {
+      const results = await Promise.all(
+        credentialRows.map(async (row) => ({
+          row,
+          result: await queryGoogleAgyQuota({
+            requestTimeoutMs: ctx.config?.requestTimeoutMsConfigured
+              ? ctx.config.requestTimeoutMs
+              : undefined,
+            authData: { [row.integrationId]: row.value } as AuthData,
+          }),
+        })),
+      );
+      const names = formatCredentialDisplayNames(
+        "Google AGY",
+        results.map(({ row }) => ({ row, fallbackName: "Google AGY" })),
+      );
+      const entries: QuotaToastEntry[] = [];
+      const errors: QuotaProviderResult["errors"] = [];
+      for (const [index, { row, result }] of results.entries()) {
+        const credentialName = names[index] ?? "Google AGY";
+        if (!result) continue;
+        if (!result.success) {
+          errors.push({ label: credentialName, message: result.error });
+          continue;
+        }
+        for (const bucket of [...result.buckets].sort(compareBuckets)) {
+          const familyLabel = formatAgyFamilyLabel(bucket.family);
+          const group = formatAgyCredentialGroup(credentialName, familyLabel);
+          const right = formatRemainingAmount(bucket.remainingAmount);
+          entries.push({
+            accounting: {
+              resultType: "quota",
+              acquisitionMethod: "remote_api",
+              ownership: "maintained",
+              authority: "provider_reported",
+              sourceId: row.id,
+            },
+            name: `${group} ${bucket.windowLabel}`,
+            group,
+            label: `${bucket.windowLabel}:`,
+            sortPriority: windowRank(bucket.window),
+            ...(right ? { right } : {}),
+            percentRemaining: bucket.percentRemaining,
+            resetTimeIso: bucket.resetTimeIso,
+          });
+        }
+        errors.push(
+          ...(result.errors ?? []).map((error) => ({
+            label: credentialName,
+            message: error.error,
+          })),
+        );
+      }
+      return withStatusDetails(
+        attemptedResult(entries, errors, { singleWindowShowRight: true }),
+        statusDetails,
+      );
+    }
+    const result = await queryGoogleAgyQuota({
       requestTimeoutMs: ctx.config?.requestTimeoutMsConfigured
         ? ctx.config.requestTimeoutMs
         : undefined,
@@ -169,7 +243,7 @@ export const googleAgyProvider: QuotaProvider = {
           acquisitionMethod: "remote_api",
           ownership: "maintained",
           authority: "provider_reported",
-          sourceId: bucket.accountKey ?? bucket.accountEmail ?? `account-${bucket.accountIndex}`,
+          sourceId: `account-${bucket.accountIndex + 1}`,
         },
         name: `${bucket.family} (${accountLabel})`,
         group: `AGY (${accountLabel}): ${formatAgyFamilyLabel(bucket.family)}`,

@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../src/lib/google-agy.js", () => ({
+  AGY_AUTH_KEYS: ["google-agy", "opencode-agy-auth", "google-agy-auth"],
   hasAgyQuotaRuntimeAvailable: vi.fn(async () => true),
   queryGoogleAgyQuota: mocks.queryGoogleAgyQuota,
   inspectAgyAuthPresence: vi.fn(async () => ({
@@ -32,7 +33,6 @@ function bucket(params: {
   window: "weekly" | "five_hour";
   percentRemaining: number;
   accountEmail: string;
-  accountKey: string;
   accountIndex: number;
 }) {
   return {
@@ -52,7 +52,6 @@ describe("Google AGY provider surfaces", () => {
           window: "five_hour",
           percentRemaining: 100,
           accountEmail: "alice@example.com",
-          accountKey: "account-alice",
           accountIndex: 0,
         }),
         bucket({
@@ -60,7 +59,6 @@ describe("Google AGY provider surfaces", () => {
           window: "weekly",
           percentRemaining: 99,
           accountEmail: "alice@example.com",
-          accountKey: "account-alice",
           accountIndex: 0,
         }),
         bucket({
@@ -68,7 +66,6 @@ describe("Google AGY provider surfaces", () => {
           window: "five_hour",
           percentRemaining: 100,
           accountEmail: "alice@example.com",
-          accountKey: "account-alice",
           accountIndex: 0,
         }),
         bucket({
@@ -76,7 +73,6 @@ describe("Google AGY provider surfaces", () => {
           window: "weekly",
           percentRemaining: 82,
           accountEmail: "alice@example.com",
-          accountKey: "account-alice",
           accountIndex: 0,
         }),
         bucket({
@@ -84,7 +80,6 @@ describe("Google AGY provider surfaces", () => {
           window: "five_hour",
           percentRemaining: 90,
           accountEmail: "bob@example.com",
-          accountKey: "account-bob",
           accountIndex: 1,
         }),
         bucket({
@@ -92,7 +87,6 @@ describe("Google AGY provider surfaces", () => {
           window: "weekly",
           percentRemaining: 75,
           accountEmail: "bob@example.com",
-          accountKey: "account-bob",
           accountIndex: 1,
         }),
         bucket({
@@ -100,7 +94,6 @@ describe("Google AGY provider surfaces", () => {
           window: "five_hour",
           percentRemaining: 80,
           accountEmail: "bob@example.com",
-          accountKey: "account-bob",
           accountIndex: 1,
         }),
         bucket({
@@ -108,7 +101,6 @@ describe("Google AGY provider surfaces", () => {
           window: "weekly",
           percentRemaining: 60,
           accountEmail: "bob@example.com",
-          accountKey: "account-bob",
           accountIndex: 1,
         }),
       ],
@@ -143,8 +135,8 @@ describe("Google AGY provider surfaces", () => {
     for (const output of [toast, sidebar]) {
       for (const header of headers) expect(output).toContain(header);
       expect(output).toContain("Weekly");
-      expect(output).toContain("Five-hour");
-      expect(output.indexOf("Weekly")).toBeLessThan(output.indexOf("Five-hour"));
+      expect(output).toContain("5h");
+      expect(output.indexOf("Weekly")).toBeLessThan(output.indexOf("5h"));
     }
     for (const header of headers) expect(command).toContain(header);
     expect(command.indexOf("Week quota")).toBeLessThan(command.indexOf("5h quota"));
@@ -155,14 +147,14 @@ describe("Google AGY provider surfaces", () => {
         "AGY (bob…): Claude/GPT 7d 60%, 5h 80%",
     );
     expect(entries.map((entry) => entry.accounting.sourceId)).toEqual([
-      "account-alice",
-      "account-alice",
-      "account-alice",
-      "account-alice",
-      "account-bob",
-      "account-bob",
-      "account-bob",
-      "account-bob",
+      "account-1",
+      "account-1",
+      "account-1",
+      "account-1",
+      "account-2",
+      "account-2",
+      "account-2",
+      "account-2",
     ]);
   });
 });

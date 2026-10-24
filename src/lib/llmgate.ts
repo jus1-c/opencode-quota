@@ -1,10 +1,10 @@
 /** LLMGate billing-overview quota client. */
 
-import type { QuotaError } from "./types.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import { clampPercent } from "./format-utils.js";
 import { fetchWithTimeout } from "./http.js";
-import { getAuthPaths, readAuthFile } from "./opencode-auth.js";
+import { getCredentialDatabasePaths, readAuthFile } from "./opencode-auth.js";
+import type { QuotaError } from "./types.js";
 
 const LLMGATE_BILLING_OVERVIEW_URL = "https://llmgate.app/api/v1/billing/overview";
 const USER_AGENT = "OpenCode-Quota-Toast/1.0";
@@ -85,12 +85,19 @@ function parseWindow(value: unknown): LlmGateQuotaWindow | undefined {
   const limit = finiteNumber(record.limit);
   const used = finiteNumber(record.used);
   const reportedRemaining = finiteNumber(record.remaining);
-  if (limit === undefined || !Number.isFinite(limit) || limit <= 0 || used === undefined || used < 0) {
+  if (
+    limit === undefined ||
+    !Number.isFinite(limit) ||
+    limit <= 0 ||
+    used === undefined ||
+    used < 0
+  ) {
     return undefined;
   }
-  const remaining = reportedRemaining !== undefined && reportedRemaining >= 0
-    ? reportedRemaining
-    : Math.max(0, limit - used);
+  const remaining =
+    reportedRemaining !== undefined && reportedRemaining >= 0
+      ? reportedRemaining
+      : Math.max(0, limit - used);
   return {
     limit,
     used,
@@ -103,14 +110,20 @@ function parseWindow(value: unknown): LlmGateQuotaWindow | undefined {
 function parseOverview(payload: unknown): LlmGateQuotaSuccess | QuotaError {
   const data = asRecord(asRecord(payload).data);
   if (Object.keys(data).length === 0) {
-    return { success: false, error: "LLMGate billing response returned an unexpected response shape" };
+    return {
+      success: false,
+      error: "LLMGate billing response returned an unexpected response shape",
+    };
   }
 
   const quota = asRecord(data.usage_quota);
   const fiveHour = parseWindow(quota.five_hour);
   const weekly = parseWindow(quota.weekly);
   if (!fiveHour && !weekly) {
-    return { success: false, error: "LLMGate billing response has no reportable usage quota windows" };
+    return {
+      success: false,
+      error: "LLMGate billing response has no reportable usage quota windows",
+    };
   }
 
   return {
@@ -118,7 +131,9 @@ function parseOverview(payload: unknown): LlmGateQuotaSuccess | QuotaError {
     ...(nonEmptyString(data.plan_code) ? { planCode: nonEmptyString(data.plan_code) } : {}),
     ...(nonEmptyString(data.plan_name) ? { planName: nonEmptyString(data.plan_name) } : {}),
     ...(nonEmptyString(data.status) ? { planStatus: nonEmptyString(data.status) } : {}),
-    ...(finiteNumber(data.credit_balance) !== undefined ? { creditBalance: finiteNumber(data.credit_balance) } : {}),
+    ...(finiteNumber(data.credit_balance) !== undefined
+      ? { creditBalance: finiteNumber(data.credit_balance) }
+      : {}),
     windows: {
       ...(fiveHour ? { fiveHour } : {}),
       ...(weekly ? { weekly } : {}),
@@ -135,31 +150,30 @@ async function fetchOverview(
   | { state: "failed"; error: string }
 > {
   try {
-    return await fetchWithTimeout(
-      LLMGATE_BILLING_OVERVIEW_URL,
-      {
-        request: {
-          method: "GET",
-          headers: {
-            Accept: "application/json",
-            Authorization: `Bearer ${auth.accessToken}`,
-            "User-Agent": USER_AGENT,
-          },
-        },
-        timeoutMs: requestTimeoutMs,
-        consume: async (response) => {
-          if (response.status === 401 || response.status === 403) return { state: "unauthorized" };
-          if (!response.ok) {
-            return {
-              state: "failed",
-              error: `LLMGate API error ${response.status}: ${sanitizeDisplaySnippet(await response.text(), 120)}`,
-            };
-          }
-          const parsed = parseOverview(await response.json());
-          return parsed.success ? { state: "success", data: parsed } : { state: "failed", error: parsed.error };
+    return await fetchWithTimeout(LLMGATE_BILLING_OVERVIEW_URL, {
+      request: {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${auth.accessToken}`,
+          "User-Agent": USER_AGENT,
         },
       },
-    );
+      timeoutMs: requestTimeoutMs,
+      consume: async (response) => {
+        if (response.status === 401 || response.status === 403) return { state: "unauthorized" };
+        if (!response.ok) {
+          return {
+            state: "failed",
+            error: `LLMGate API error ${response.status}: ${sanitizeDisplaySnippet(await response.text(), 120)}`,
+          };
+        }
+        const parsed = parseOverview(await response.json());
+        return parsed.success
+          ? { state: "success", data: parsed }
+          : { state: "failed", error: parsed.error };
+      },
+    });
   } catch (error) {
     return {
       state: "failed",
@@ -173,7 +187,7 @@ export async function queryLlmGateQuota(
 ): Promise<LlmGateQuotaResult> {
   let auth: LlmGateAuthTokens | undefined;
   try {
-    auth = authTokensFromAuth(await readAuthFile());
+    auth = authTokensFromAuth(await readAuthFile({ integrationIds: ["llmgate"] }));
   } catch {
     return null;
   }
@@ -194,7 +208,7 @@ export async function queryLlmGateQuota(
 
 export async function hasLlmGateAuthTokens(): Promise<boolean> {
   try {
-    return Boolean(authTokensFromAuth(await readAuthFile()));
+    return Boolean(authTokensFromAuth(await readAuthFile({ integrationIds: ["llmgate"] })));
   } catch {
     return false;
   }
@@ -207,19 +221,19 @@ export async function getLlmGateAuthDiagnostics(): Promise<{
   authPaths: string[];
 }> {
   try {
-    const metadata = authMetadataFromAuth(await readAuthFile());
+    const metadata = authMetadataFromAuth(await readAuthFile({ integrationIds: ["llmgate"] }));
     return {
       configured: Boolean(metadata.accessToken && metadata.refreshToken),
       accessTokenConfigured: Boolean(metadata.accessToken),
       refreshTokenConfigured: Boolean(metadata.refreshToken),
-      authPaths: getAuthPaths(),
+      authPaths: getCredentialDatabasePaths(),
     };
   } catch {
     return {
       configured: false,
       accessTokenConfigured: false,
       refreshTokenConfigured: false,
-      authPaths: getAuthPaths(),
+      authPaths: getCredentialDatabasePaths(),
     };
   }
 }

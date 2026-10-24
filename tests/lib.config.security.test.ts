@@ -10,15 +10,15 @@ import {
 
 const runtimeDirs = vi.hoisted(() => ({
   value: {
-    dataDirs: [] as string[],
-    configDirs: [] as string[],
-    cacheDirs: [] as string[],
-    stateDirs: [] as string[],
+    dataDir: "",
+    configDir: "",
+    cacheDir: "",
+    stateDir: "",
   },
 }));
 
 vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
-  getOpencodeRuntimeDirCandidates: () => runtimeDirs.value,
+  getOpencodeRuntimeDirs: () => runtimeDirs.value,
 }));
 
 import { createLoadConfigMeta, loadConfig } from "../src/lib/config.js";
@@ -297,6 +297,7 @@ describe("loadConfig layered precedence", () => {
           quotaToast: {
             maintainerAnnouncements: {
               home: false,
+              homeFrequency: "always",
             },
           },
         },
@@ -310,11 +311,15 @@ describe("loadConfig layered precedence", () => {
     expect(cfg.maintainerAnnouncements).toEqual({
       enabled: false,
       home: false,
+      homeFrequency: "always",
     });
     expect(meta.settingSources["maintainerAnnouncements.enabled"]).toBe(
       quotaConfigSource(join(xdgConfigHome, "opencode")),
     );
     expect(meta.settingSources["maintainerAnnouncements.home"]).toBe(
+      quotaConfigSource(workspaceDir),
+    );
+    expect(meta.settingSources["maintainerAnnouncements.homeFrequency"]).toBe(
       quotaConfigSource(workspaceDir),
     );
     expect(meta.networkSettingSources).toEqual({});
@@ -328,6 +333,7 @@ describe("loadConfig layered precedence", () => {
           quotaToast: {
             tuiSidebarPanel: {
               enabled: false,
+              opencodeGoPreferredWindow: "rolling",
             },
           },
         },
@@ -342,6 +348,7 @@ describe("loadConfig layered precedence", () => {
           quotaToast: {
             tuiSidebarPanel: {
               enabled: "yes",
+              opencodeGoPreferredWindow: "daily",
             },
           },
         },
@@ -352,8 +359,14 @@ describe("loadConfig layered precedence", () => {
     const meta = createLoadConfigMeta();
     const cfg = await loadConfig(undefined, meta, { cwd: workspaceDir });
 
-    expect(cfg.tuiSidebarPanel).toEqual({ enabled: false });
+    expect(cfg.tuiSidebarPanel).toEqual({
+      enabled: false,
+      opencodeGoPreferredWindow: "rolling",
+    });
     expect(meta.settingSources["tuiSidebarPanel.enabled"]).toBe(
+      quotaConfigSource(join(xdgConfigHome, "opencode")),
+    );
+    expect(meta.settingSources["tuiSidebarPanel.opencodeGoPreferredWindow"]).toBe(
       quotaConfigSource(join(xdgConfigHome, "opencode")),
     );
   });
@@ -382,7 +395,6 @@ describe("loadConfig layered precedence", () => {
           quotaToast: {
             tuiCompactStatus: {
               homeBottom: false,
-              suppressWhenNativeProviderQuota: false,
               maxWidth: 0,
             },
           },
@@ -398,7 +410,6 @@ describe("loadConfig layered precedence", () => {
       enabled: true,
       homeBottom: false,
       sessionPrompt: false,
-      suppressWhenNativeProviderQuota: false,
       maxWidth: 80,
     });
     expect(meta.settingSources["tuiCompactStatus.enabled"]).toBe(
@@ -413,9 +424,6 @@ describe("loadConfig layered precedence", () => {
     expect(meta.settingSources["tuiCompactStatus.homeBottom"]).toBe(
       quotaConfigSource(workspaceDir),
     );
-    expect(meta.settingSources["tuiCompactStatus.suppressWhenNativeProviderQuota"]).toBe(
-      quotaConfigSource(workspaceDir),
-    );
   });
 
   it("preserves the previous valid layer when workspace values are invalid", async () => {
@@ -426,7 +434,6 @@ describe("loadConfig layered precedence", () => {
           quotaToast: {
             enabledProviders: ["openai"],
             anthropicBinaryPath: "/usr/local/bin/claude",
-            googleModels: ["CLAUDE", "G3PRO"],
             cursorIncludedApiUsd: 42,
             cursorBillingCycleStartDay: 7,
             pricingSnapshot: { source: "bundled", autoRefresh: 30 },
@@ -445,7 +452,6 @@ describe("loadConfig layered precedence", () => {
           quotaToast: {
             enabledProviders: ["not-a-provider"],
             anthropicBinaryPath: "   ",
-            googleModels: [],
             cursorIncludedApiUsd: 0,
             cursorBillingCycleStartDay: 31,
             pricingSnapshot: { source: "remote", autoRefresh: 0 },
@@ -462,7 +468,6 @@ describe("loadConfig layered precedence", () => {
 
     expect(cfg.enabledProviders).toEqual(["openai"]);
     expect(cfg.anthropicBinaryPath).toBe("/usr/local/bin/claude");
-    expect(cfg.googleModels).toEqual(["CLAUDE", "G3PRO"]);
     expect(cfg.cursorIncludedApiUsd).toBe(42);
     expect(cfg.cursorBillingCycleStartDay).toBe(7);
     expect(cfg.pricingSnapshot).toEqual({ source: "bundled", autoRefresh: 30 });
@@ -471,7 +476,6 @@ describe("loadConfig layered precedence", () => {
     const globalQuotaConfigSource = quotaConfigSource(join(xdgConfigHome, "opencode"));
     expect(meta.settingSources.enabledProviders).toBe(globalQuotaConfigSource);
     expect(meta.settingSources.anthropicBinaryPath).toBe(globalQuotaConfigSource);
-    expect(meta.settingSources.googleModels).toBe(globalQuotaConfigSource);
     expect(meta.settingSources.cursorIncludedApiUsd).toBe(globalQuotaConfigSource);
     expect(meta.settingSources.cursorBillingCycleStartDay).toBe(globalQuotaConfigSource);
     expect(meta.settingSources["pricingSnapshot.source"]).toBe(globalQuotaConfigSource);

@@ -6,6 +6,8 @@ import { promisify } from "node:util";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { isolatedGitEnv, stubIsolatedGitEnv } from "./helpers/isolated-git-env.js";
+
 const execFileAsync = promisify(execFile);
 
 const testState = vi.hoisted(() => ({
@@ -35,12 +37,12 @@ describe("upstream-plugin-lock", () => {
       `${JSON.stringify(
         {
           plugins: {
-            "opencode-antigravity-auth": {
-              npmUrl: "https://www.npmjs.com/package/opencode-antigravity-auth/v/1.0.0",
-              packageName: "opencode-antigravity-auth",
+            "opencode-gemini-auth": {
+              npmUrl: "https://www.npmjs.com/package/opencode-gemini-auth/v/1.0.0",
+              packageName: "opencode-gemini-auth",
               publishedAt: "2026-03-01T00:00:00.000Z",
-              referenceDir: "references/upstream-plugins/opencode-antigravity-auth",
-              repo: "NoeFabris/opencode-antigravity-auth",
+              referenceDir: "references/upstream-plugins/opencode-gemini-auth",
+              repo: "jenslys/opencode-gemini-auth",
               version: "1.0.0",
             },
           },
@@ -60,21 +62,22 @@ describe("upstream-plugin-lock", () => {
   it("reads the committed lock when synchronized metadata remains uncommitted", async () => {
     const lockPath = path.join(testState.repoRoot, "references", "upstream-plugins", "lock.json");
     const previousEntry = {
-      npmUrl: "https://www.npmjs.com/package/opencode-cursor-oauth/v/0.4.3",
-      packageName: "opencode-cursor-oauth",
+      npmUrl: "https://www.npmjs.com/package/%40old-scope/cursor-opencode-provider/v/0.4.3",
+      packageName: "@old-scope/cursor-opencode-provider",
       publishedAt: "2026-04-08T14:04:58.057Z",
-      referenceDir: "references/upstream-plugins/opencode-cursor-oauth",
-      repo: "old-owner/opencode-cursor",
+      referenceDir: "references/upstream-plugins/cursor-opencode-provider",
+      repo: "old-owner/cursor-opencode-provider",
       version: "0.4.3",
     };
     await writeFile(
       lockPath,
-      `${JSON.stringify({ plugins: { "opencode-cursor-oauth": previousEntry } }, null, 2)}\n`,
+      `${JSON.stringify({ plugins: { "cursor-opencode-provider": previousEntry } }, null, 2)}\n`,
       "utf8",
     );
-    await execFileAsync("git", ["init"], { cwd: testState.repoRoot });
+    await execFileAsync("git", ["init"], { cwd: testState.repoRoot, env: isolatedGitEnv() });
     await execFileAsync("git", ["add", "references/upstream-plugins/lock.json"], {
       cwd: testState.repoRoot,
+      env: isolatedGitEnv(),
     });
     await execFileAsync(
       "git",
@@ -89,18 +92,18 @@ describe("upstream-plugin-lock", () => {
         "-m",
         "baseline",
       ],
-      { cwd: testState.repoRoot },
+      { cwd: testState.repoRoot, env: isolatedGitEnv() },
     );
 
     const currentEntry = {
       ...previousEntry,
-      npmUrl: "https://www.npmjs.com/package/%40playwo/opencode-cursor-oauth/v/0.4.3",
-      packageName: "@playwo/opencode-cursor-oauth",
-      repo: "PoolPirate/opencode-cursor",
+      npmUrl: "https://www.npmjs.com/package/cursor-opencode-provider/v/0.4.3",
+      packageName: "cursor-opencode-provider",
+      repo: "oakimov/cursor-opencode-provider",
     };
     await writeFile(
       lockPath,
-      `${JSON.stringify({ plugins: { "opencode-cursor-oauth": currentEntry } }, null, 2)}\n`,
+      `${JSON.stringify({ plugins: { "cursor-opencode-provider": currentEntry } }, null, 2)}\n`,
       "utf8",
     );
 
@@ -110,6 +113,8 @@ describe("upstream-plugin-lock", () => {
     const { buildChangedPluginSummaries } = await import(
       "../scripts/lib/upstream-plugin-review.mjs"
     );
+    // readCommittedUpstreamPluginLock runs `git show` with the inherited process.env.
+    stubIsolatedGitEnv();
     const committedLock = await readCommittedUpstreamPluginLock({
       repositoryRoot: testState.repoRoot,
       lockPath,
@@ -121,7 +126,7 @@ describe("upstream-plugin-lock", () => {
         changeKind: "metadata",
         changedFields: ["packageName", "repo", "npmUrl"],
         currentVersion: "0.4.3",
-        pluginId: "opencode-cursor-oauth",
+        pluginId: "cursor-opencode-provider",
         previousVersion: "0.4.3",
       },
     ]);
@@ -132,20 +137,20 @@ describe("upstream-plugin-lock", () => {
 
     await writeUpstreamPluginLock({
       plugins: {
-        "opencode-cursor-oauth": {
-          npmUrl: "https://www.npmjs.com/package/%40playwo/opencode-cursor-oauth/v/2.0.0",
-          packageName: "@playwo/opencode-cursor-oauth",
+        "cursor-opencode-provider": {
+          npmUrl: "https://www.npmjs.com/package/cursor-opencode-provider/v/2.0.0",
+          packageName: "cursor-opencode-provider",
           publishedAt: "2026-03-20T00:00:00.000Z",
-          referenceDir: "references/upstream-plugins/opencode-cursor-oauth",
-          repo: "PoolPirate/opencode-cursor",
+          referenceDir: "references/upstream-plugins/cursor-opencode-provider",
+          repo: "oakimov/cursor-opencode-provider",
           version: "2.0.0",
         },
-        "opencode-antigravity-auth": {
-          npmUrl: "https://www.npmjs.com/package/opencode-antigravity-auth/v/2.0.0",
-          packageName: "opencode-antigravity-auth",
+        "opencode-gemini-auth": {
+          npmUrl: "https://www.npmjs.com/package/opencode-gemini-auth/v/2.0.0",
+          packageName: "opencode-gemini-auth",
           publishedAt: "2026-03-20T00:00:00.000Z",
-          referenceDir: "references/upstream-plugins/opencode-antigravity-auth",
-          repo: "NoeFabris/opencode-antigravity-auth",
+          referenceDir: "references/upstream-plugins/opencode-gemini-auth",
+          repo: "jenslys/opencode-gemini-auth",
           version: "2.0.0",
         },
       },
@@ -154,7 +159,7 @@ describe("upstream-plugin-lock", () => {
     const lockPath = path.join(testState.repoRoot, "references", "upstream-plugins", "lock.json");
     await expect(readFile(lockPath, "utf8")).resolves.toContain(`"version": "2.0.0"`);
     await expect(readFile(lockPath, "utf8")).resolves.toContain(
-      `"packageName": "@playwo/opencode-cursor-oauth"`,
+      `"packageName": "cursor-opencode-provider"`,
     );
 
     const entries = await readdir(path.dirname(lockPath));

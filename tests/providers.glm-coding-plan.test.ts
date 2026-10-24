@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { formatQuotaCommand } from "../src/lib/quota-command-format.js";
+import type { QuotaRenderData } from "../src/lib/quota-render-data.js";
+import { formatQuotaRowsGrouped } from "../src/lib/toast-format-grouped.js";
+import { buildCompactQuotaStatusLine } from "../src/lib/tui-compact-format.js";
+import { buildSidebarQuotaPanelLines } from "../src/lib/tui-sidebar-format.js";
+
 import {
   expectAttemptedWithErrorLabel,
   expectAttemptedWithNoErrors,
@@ -20,24 +26,33 @@ vi.mock("../src/lib/zhipu.js", () => ({ queryZhipuQuota: mocks.queryZhipuQuota }
 vi.mock("../src/lib/zai-auth.js", () => ({
   DEFAULT_ZAI_AUTH_CACHE_MAX_AGE_MS: 5_000,
   resolveZaiAuthCached: mocks.resolveZaiAuthCached,
+  resolveZaiAuth: vi.fn(),
   getZaiAuthDiagnostics: vi.fn(async () => ({
     state: "none",
     source: null,
     checkedPaths: [],
-    authPaths: [],
+    credentialDatabasePaths: [],
   })),
 }));
 vi.mock("../src/lib/zhipu-auth.js", () => ({
   DEFAULT_ZHIPU_AUTH_CACHE_MAX_AGE_MS: 5_000,
   resolveZhipuAuthCached: mocks.resolveZhipuAuthCached,
+  resolveZhipuAuth: vi.fn(),
   getZhipuAuthDiagnostics: vi.fn(async () => ({
     state: "none",
     source: null,
     checkedPaths: [],
-    authPaths: [],
+    credentialDatabasePaths: [],
   })),
 }));
 
+vi.mock("../src/lib/opencode-auth.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/lib/opencode-auth.js")>()),
+  readCredentialRows: vi.fn().mockResolvedValue([]),
+}));
+
+import { readCredentialRows } from "../src/lib/opencode-auth.js";
+import { getZaiAuthDiagnostics, resolveZaiAuth } from "../src/lib/zai-auth.js";
 import { zaiProvider } from "../src/providers/zai.js";
 import { zhipuProvider } from "../src/providers/zhipu.js";
 
@@ -176,5 +191,123 @@ describe.each(PROVIDERS)("$label GLM provider", (descriptor) => {
       ),
     ).resolves.toBe(false);
     expect(descriptor.resolveAuth).not.toHaveBeenCalled();
+  });
+});
+
+describe("GLM database credential rows", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("shows a login OpenCode could not return as its own error row next to working rows", async () => {
+    const actual =
+      await vi.importActual<typeof import("../src/lib/zai-auth.js")>("../src/lib/zai-auth.js");
+    vi.mocked(resolveZaiAuth).mockImplementation(actual.resolveZaiAuth);
+    vi.mocked(getZaiAuthDiagnostics).mockResolvedValueOnce({
+      state: "invalid",
+      source: "opencode.db",
+      checkedPaths: [],
+      credentialDatabasePaths: ["/tmp/opencode.db"],
+      error: "OpenCode could not read this login: refresh_failed: HTTP 401",
+    });
+    vi.mocked(readCredentialRows).mockResolvedValueOnce([
+      {
+        id: "failed-id",
+        integrationId: "zai-coding-plan",
+        label: "Work",
+        active: true,
+        value: { type: "api" },
+        resolveError: "refresh_failed: HTTP 401",
+      },
+      {
+        id: "working-id",
+        integrationId: "zai-coding-plan",
+        label: "Home",
+        active: false,
+        value: { type: "api", key: "home-key" },
+      },
+    ]);
+    mocks.queryZaiQuota.mockResolvedValueOnce({
+      success: true,
+      label: "Z.ai",
+      windows: { fiveHour: { percentRemaining: 80 } },
+    });
+
+    const out = await zaiProvider.fetch({ config: {} } as any);
+
+    expect(readCredentialRows).toHaveBeenCalledWith(["zai-coding-plan"], { methods: ["key"] });
+    expect(mocks.queryZaiQuota).toHaveBeenCalledTimes(1);
+    expect(mocks.queryZaiQuota).toHaveBeenCalledWith({
+      requestTimeoutMs: undefined,
+      apiKey: "home-key",
+    });
+    expect(out.errors).toEqual([
+      {
+        label: "[Z.ai Work] (active)",
+        message: "OpenCode could not read this login: refresh_failed: HTTP 401",
+      },
+    ]);
+    expect(out.entries.map((entry) => [entry.group, entry.accounting.sourceId])).toEqual([
+      ["[Z.ai Home]", "working-id"],
+    ]);
+  });
+});
+
+describe("Z.ai credit quota surfaces", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("renders credit-backed five-hour and weekly percentages on all four surfaces", async () => {
+    mocks.queryZaiQuota.mockResolvedValueOnce({
+      success: true,
+      label: "Z.ai",
+      windows: {
+        fiveHour: { percentRemaining: 96, resetTimeIso: undefined },
+        weekly: { percentRemaining: 89, resetTimeIso: undefined },
+      },
+    });
+
+    const out = await zaiProvider.fetch({} as any);
+    expectAttemptedWithNoErrors(out);
+    expect(visibleEntries(out.entries, "zai")).toEqual([
+      {
+        name: "Z.ai 5h",
+        group: "Z.ai",
+        label: "5h:",
+        percentRemaining: 96,
+        resetTimeIso: undefined,
+      },
+      {
+        name: "Z.ai Weekly",
+        group: "Z.ai",
+        label: "Weekly:",
+        percentRemaining: 89,
+        resetTimeIso: undefined,
+      },
+    ]);
+
+    const data: QuotaRenderData = { entries: out.entries, errors: out.errors };
+    const command = formatQuotaCommand({ ...data, generatedAtMs: 0 });
+    const toast = formatQuotaRowsGrouped(data);
+    const sidebar = buildSidebarQuotaPanelLines({
+      data,
+      config: { formatStyle: "allWindows", percentDisplayMode: "remaining" },
+    }).join("\n");
+    const compact = buildCompactQuotaStatusLine({
+      data,
+      percentDisplayMode: "remaining",
+      maxWidth: 240,
+    });
+
+    for (const output of [command, toast, sidebar, compact]) {
+      expect(output).toContain("Z.ai");
+      expect(output).toContain("96%");
+      expect(output).toContain("89%");
+    }
+    for (const output of [command, toast, sidebar]) {
+      expect(output).toContain("5h");
+      expect(output).toMatch(/\bWeek(?:ly)?\b/u);
+    }
   });
 });

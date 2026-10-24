@@ -255,6 +255,197 @@ describe("pricing runtime refresh policy", () => {
     expect(persistedSnapshot.providers.openai["gpt-4o-mini"].input).toBe(0.15);
   });
 
+  it("keeps models that models.dev no longer lists, preferring the runtime price", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+    const bundledGeneratedAt = nowMs - 10 * DAY_MS;
+    const runtimeGeneratedAt = nowMs - 4 * DAY_MS;
+
+    const bundled = createBootstrapSnapshot(bundledGeneratedAt);
+    Object.assign(bundled.providers.openai, {
+      "retired-in-both": { input: 1, output: 2 },
+      "retired-bundled-only": { input: 3, output: 4 },
+    });
+    const runtime = createRuntimeSnapshot(runtimeGeneratedAt, 0.5);
+    Object.assign(runtime.providers.openai, {
+      "retired-in-both": { input: 5, output: 6 },
+    });
+    await mkdir(join(runtimeDirs.cacheDir, "opencode-quota"), { recursive: true });
+    await writeFile(
+      pricing.getRuntimePricingSnapshotPath(runtimeDirs),
+      JSON.stringify(runtime),
+      "utf-8",
+    );
+
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          openai: { models: { "gpt-4o-mini": { cost: { input: 0.123, output: 0.456 } } } },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await pricing.maybeRefreshPricingSnapshot({
+      nowMs,
+      runtimeDirs,
+      fetchFn,
+      maxAgeMs: 3 * DAY_MS,
+      bootstrapSnapshotOverride: bundled,
+    });
+
+    expect(result.updated).toBe(true);
+    expect(pricing.getPricingSnapshotSource()).toBe("runtime");
+    expect(pricing.lookupCost("openai", "gpt-4o-mini")).toEqual({ input: 0.123, output: 0.456 });
+    expect(pricing.lookupCost("openai", "retired-in-both")).toEqual({ input: 5, output: 6 });
+    expect(pricing.lookupCost("openai", "retired-bundled-only")).toEqual({ input: 3, output: 4 });
+
+    const persistedSnapshot = JSON.parse(
+      await readFile(pricing.getRuntimePricingSnapshotPath(runtimeDirs), "utf-8"),
+    );
+    expect(Object.keys(persistedSnapshot.providers.openai)).toEqual([
+      "gpt-4o-mini",
+      "retired-bundled-only",
+      "retired-in-both",
+    ]);
+  });
+
+  it("prefers the runtime price of a retired model even when the bundled file is newer", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+
+    // Bundled file rewritten later, but its kept price is an older observation.
+    const bundled = createBootstrapSnapshot(nowMs - 2 * DAY_MS);
+    Object.assign(bundled.providers.openai, { "retired-model": { input: 1, output: 2 } });
+    const runtime = createRuntimeSnapshot(nowMs - 20 * DAY_MS, 0.5);
+    Object.assign(runtime.providers.openai, { "retired-model": { input: 7, output: 8 } });
+    await mkdir(join(runtimeDirs.cacheDir, "opencode-quota"), { recursive: true });
+    await writeFile(
+      pricing.getRuntimePricingSnapshotPath(runtimeDirs),
+      JSON.stringify(runtime),
+      "utf-8",
+    );
+
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          openai: { models: { "gpt-4o-mini": { cost: { input: 0.123, output: 0.456 } } } },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await pricing.maybeRefreshPricingSnapshot({
+      nowMs,
+      runtimeDirs,
+      fetchFn,
+      force: true,
+      bootstrapSnapshotOverride: bundled,
+    });
+
+    const persistedSnapshot = JSON.parse(
+      await readFile(pricing.getRuntimePricingSnapshotPath(runtimeDirs), "utf-8"),
+    );
+    expect(persistedSnapshot.providers.openai["retired-model"]).toEqual({ input: 7, output: 8 });
+    expect(pricing.lookupCost("openai", "retired-model")).toEqual({ input: 7, output: 8 });
+  });
+
+  it("fills retired models from the bundled file into a fresh runtime snapshot without refreshing", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+
+    const bundled = createBootstrapSnapshot(nowMs - 10 * DAY_MS);
+    Object.assign(bundled.providers.openai, { "retired-model": { input: 3, output: 4 } });
+    // Saved by an older version after models.dev dropped the model, and still fresh.
+    await mkdir(join(runtimeDirs.cacheDir, "opencode-quota"), { recursive: true });
+    await writeFile(
+      pricing.getRuntimePricingSnapshotPath(runtimeDirs),
+      JSON.stringify(createRuntimeSnapshot(nowMs - DAY_MS, 0.5)),
+      "utf-8",
+    );
+
+    const fetchFn = vi.fn();
+    const result = await pricing.maybeRefreshPricingSnapshot({
+      nowMs,
+      runtimeDirs,
+      fetchFn,
+      maxAgeMs: 7 * DAY_MS,
+      bootstrapSnapshotOverride: bundled,
+    });
+
+    expect(result.reason).toBe("fresh");
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(pricing.getPricingSnapshotSource()).toBe("runtime");
+    expect(pricing.lookupCost("openai", "gpt-4o-mini")?.input).toBe(0.5);
+    expect(pricing.lookupCost("openai", "retired-model")).toEqual({ input: 3, output: 4 });
+  });
+
+  it("does not save kept models from providers outside the refresh allowlist", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+
+    const bundled = createBootstrapSnapshot(nowMs - 4 * DAY_MS);
+    Object.assign(bundled.providers, { xai: { "grok-old": { input: 1, output: 2 } } });
+
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          openai: { models: { "gpt-4o-mini": { cost: { input: 0.123, output: 0.456 } } } },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await pricing.maybeRefreshPricingSnapshot({
+      nowMs,
+      runtimeDirs,
+      fetchFn,
+      maxAgeMs: 3 * DAY_MS,
+      providerAllowlist: ["openai"],
+      bootstrapSnapshotOverride: bundled,
+    });
+
+    const persistedSnapshot = JSON.parse(
+      await readFile(pricing.getRuntimePricingSnapshotPath(runtimeDirs), "utf-8"),
+    );
+    expect(persistedSnapshot._meta.providers).toEqual(["openai"]);
+    expect(persistedSnapshot.providers.xai).toBeUndefined();
+  });
+
+  it("restores bundled models missing from an older runtime snapshot on 304", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+
+    const bundled = createBootstrapSnapshot(nowMs - 10 * DAY_MS);
+    Object.assign(bundled.providers.openai, { "retired-model": { input: 3, output: 4 } });
+    await mkdir(join(runtimeDirs.cacheDir, "opencode-quota"), { recursive: true });
+    await writeFile(
+      pricing.getRuntimePricingSnapshotPath(runtimeDirs),
+      JSON.stringify(createRuntimeSnapshot(nowMs - 4 * DAY_MS, 0.5)),
+      "utf-8",
+    );
+
+    const fetchFn = vi.fn().mockResolvedValue(new Response(null, { status: 304 }));
+
+    const result = await pricing.maybeRefreshPricingSnapshot({
+      nowMs,
+      runtimeDirs,
+      fetchFn,
+      maxAgeMs: 3 * DAY_MS,
+      bootstrapSnapshotOverride: bundled,
+    });
+
+    expect(result.state.lastResult).toBe("not_modified");
+    expect(pricing.getPricingSnapshotSource()).toBe("runtime");
+    expect(pricing.lookupCost("openai", "gpt-4o-mini")?.input).toBe(0.5);
+    expect(pricing.lookupCost("openai", "retired-model")).toEqual({ input: 3, output: 4 });
+  });
+
   it("pins the bundled snapshot and skips runtime refresh attempts", async () => {
     const pricing = await loadPricingModule();
     const runtimeDirs = await createTempRuntimeDirs();

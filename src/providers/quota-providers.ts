@@ -26,6 +26,7 @@ import {
   resolveQuotaProviderApiKey,
 } from "../lib/quota-providers-remote.js";
 import { fetchQuotaProviderResult } from "../lib/quota-state.js";
+import { resolveQuotaProviderDefinitionAuthIdentity } from "./cache-policies.js";
 
 export const QUOTA_PROVIDERS_PROVIDER_ID = QUOTA_PROVIDERS_AGGREGATE_ID;
 export const selectEligibleQuotaProviders = selectEligibleQuotaProviderDefinitions;
@@ -76,7 +77,7 @@ function buildDiagnosticIdentity(
 }
 
 function mapCredentialSource(
-  source: "env" | "opencode.json" | "opencode.jsonc" | "auth.json" | null,
+  source: "env" | "opencode.json" | "opencode.jsonc" | "opencode.db" | null,
 ): QuotaProviderDiagnostic["credentialSource"] {
   switch (source) {
     case "env":
@@ -85,8 +86,8 @@ function mapCredentialSource(
       return "global_opencode_json";
     case "opencode.jsonc":
       return "global_opencode_jsonc";
-    case "auth.json":
-      return "auth_json";
+    case "opencode.db":
+      return "opencode_db";
     default:
       return null;
   }
@@ -122,7 +123,7 @@ async function executeRemote(
         outcome: "missing_credential",
         entryCount: 0,
         checkedPaths: [...auth.checkedPaths],
-        authPaths: [...auth.authPaths],
+        credentialDatabasePaths: [...auth.credentialDatabasePaths],
       },
     };
   }
@@ -139,7 +140,7 @@ async function executeRemote(
         ...classifyRuntimeError(result.error),
         entryCount: 0,
         checkedPaths: [...auth.checkedPaths],
-        authPaths: [...auth.authPaths],
+        credentialDatabasePaths: [...auth.credentialDatabasePaths],
       },
     };
   }
@@ -160,7 +161,7 @@ async function executeRemote(
       outcome: "success",
       entryCount: result.entries.length,
       checkedPaths: [...auth.checkedPaths],
-      authPaths: [...auth.authPaths],
+      credentialDatabasePaths: [...auth.credentialDatabasePaths],
     },
   };
 }
@@ -172,6 +173,10 @@ async function executeRemoteWithCache(
   const remoteProvider: QuotaProvider = {
     id: `${QUOTA_PROVIDERS_PROVIDER_ID}:${definition.id}`,
     isAvailable: async () => true,
+    cachePolicy: {
+      kind: "resolved-auth",
+      resolveIdentity: () => resolveQuotaProviderDefinitionAuthIdentity(definition),
+    },
     fetch: async () => {
       const result = await executeRemote(definition, ctx.config.requestTimeoutMs);
       return {
@@ -203,7 +208,7 @@ async function executeRemoteWithCache(
       outcome: "network_error",
       entryCount: 0,
       checkedPaths: [],
-      authPaths: [],
+      credentialDatabasePaths: [],
     },
   };
 }
@@ -229,7 +234,7 @@ async function executeDefinition(
         outcome: "success",
         entryCount: result.entries.length,
         checkedPaths: [],
-        authPaths: [],
+        credentialDatabasePaths: [],
         statePath: state.path,
         stateHealth: state.health,
         stateVersion: state.version,
@@ -248,7 +253,7 @@ async function executeDefinition(
         outcome: "local_state_error",
         entryCount: 0,
         checkedPaths: [],
-        authPaths: [],
+        credentialDatabasePaths: [],
         statePath: state.path,
         stateHealth: state.health,
         stateVersion: state.version,
@@ -280,35 +285,38 @@ export const quotaProvidersProvider: QuotaProvider = {
     return matchesConfiguredCurrentSelection(model, context);
   },
 
-  async fetch(ctx): Promise<QuotaProviderResult> {
+  async fetch(ctx, cacheContext): Promise<QuotaProviderResult> {
     const definitions = ctx.config.quotaProviders ?? [];
     if (customQuotaProviderDefinitions(definitions).length === 0) {
       return { attempted: false, entries: [], errors: [] };
     }
 
-    let availableProviderIds: ReadonlySet<string>;
-    try {
-      availableProviderIds = await getAvailableProviderIds(ctx);
-    } catch {
-      return {
-        attempted: true,
-        entries: [],
-        errors: [
-          {
-            label: "Quota providers",
-            message: "Failed to read exact runtime provider identities",
-          },
-        ],
-      };
-    }
+    let selected = cacheContext?.runtimeEligibleQuotaProviders;
+    if (!selected) {
+      let availableProviderIds: ReadonlySet<string>;
+      try {
+        availableProviderIds = await getAvailableProviderIds(ctx);
+      } catch {
+        return {
+          attempted: true,
+          entries: [],
+          errors: [
+            {
+              label: "Quota providers",
+              message: "Failed to read exact runtime provider identities",
+            },
+          ],
+        };
+      }
 
-    const selected = selectEligibleQuotaProviders({
-      definitions,
-      availableProviderIds,
-      onlyCurrentModel: ctx.config.onlyCurrentModel,
-      currentModel: ctx.config.currentModel,
-      currentProviderID: ctx.config.currentProviderID,
-    });
+      selected = selectEligibleQuotaProviders({
+        definitions,
+        availableProviderIds,
+        onlyCurrentModel: ctx.config.onlyCurrentModel,
+        currentModel: ctx.config.currentModel,
+        currentProviderID: ctx.config.currentProviderID,
+      });
+    }
     if (selected.length === 0) {
       return { attempted: false, entries: [], errors: [] };
     }
@@ -330,7 +338,7 @@ export const quotaProvidersProvider: QuotaProvider = {
               outcome: "network_error",
               entryCount: 0,
               checkedPaths: [],
-              authPaths: [],
+              credentialDatabasePaths: [],
             },
           } satisfies InstanceResult;
         }

@@ -9,6 +9,7 @@ import {
   normalizeJsonV1Timestamp,
   QUOTA_PROVIDER_MODES,
   QUOTA_PROVIDER_REMOTE_FORMATS,
+  selectEligibleQuotaProviderDefinitions,
   validateQuotaProviders,
 } from "../src/lib/quota-providers.js";
 import {
@@ -19,6 +20,26 @@ import {
 } from "./fixtures/quota-providers.js";
 
 describe("quotaProviders schema", () => {
+  it("keeps provider-wide definitions context-sensitive when no current model is selected", () => {
+    const definitions = [quotaProvider({ id: "provider-wide", providerId: "provider-one" })];
+    const availableProviderIds = new Set(["provider-one"]);
+
+    expect(
+      selectEligibleQuotaProviderDefinitions({
+        definitions,
+        availableProviderIds,
+        onlyCurrentModel: true,
+      }),
+    ).toEqual([]);
+    expect(
+      selectEligibleQuotaProviderDefinitions({
+        definitions,
+        availableProviderIds,
+        onlyCurrentModel: false,
+      }).map((definition) => definition.id),
+    ).toEqual(["provider-wide"]);
+  });
+
   it("accepts and normalizes the exact ordered remote schema", () => {
     expect(QUOTA_PROVIDER_MODES).toEqual(["remote-api", "local-estimate"]);
     expect(QUOTA_PROVIDER_REMOTE_FORMATS).toEqual(["quota-v1", "openrouter-key-v1", "json-v1"]);
@@ -859,20 +880,7 @@ describe("quotaProviders schema", () => {
     expect(normalizeJsonV1Timestamp(253_402_300_800_000, "unix-milliseconds")).toBeNull();
   });
 
-  it("accepts only the exact maintained Qwen and Alibaba tuning windows", () => {
-    expect(
-      validateQuotaProviders([
-        {
-          id: "qwen-code",
-          mode: "local-estimate",
-          windows: [
-            { id: "daily", type: "utc-day", requestLimit: 2000 },
-            { id: "rpm", type: "rolling", durationMinutes: 1, requestLimit: 120 },
-          ],
-        },
-      ]).issues,
-    ).toEqual([]);
-
+  it("accepts only the exact maintained Alibaba tuning windows", () => {
     expect(
       validateQuotaProviders([
         {
@@ -890,9 +898,9 @@ describe("quotaProviders schema", () => {
     expect(
       validateQuotaProviders([
         {
-          id: "qwen-code",
+          id: "alibaba-coding-plan",
           mode: "local-estimate",
-          windows: [{ id: "daily", type: "utc-day", requestLimit: 2000 }],
+          windows: [{ id: "five-hour", type: "rolling", durationMinutes: 300, requestLimit: 2000 }],
         },
       ]).issues[0]?.key,
     ).toBe("quotaProviders[0].windows");

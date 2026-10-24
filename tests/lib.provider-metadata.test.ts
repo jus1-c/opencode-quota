@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   getQuotaProviderDisplayLabel,
+  getQuotaProviderIdsForRuntimeId,
   getQuotaProviderRuntimeIds,
   getQuotaProviderShape,
   normalizeQuotaProviderId,
@@ -11,6 +12,7 @@ import {
   QUOTA_PROVIDER_RUNTIME_IDS,
   QUOTA_PROVIDER_SHAPES,
 } from "../src/lib/provider-metadata.js";
+import { QUOTA_PROVIDER_REGISTRATION_SOURCE } from "../src/lib/provider-registration.js";
 
 describe("provider-metadata", () => {
   it("defines the canonical provider setup catalog", () => {
@@ -60,18 +62,18 @@ describe("provider-metadata", () => {
         notes: "companion runtime/plugin integration plus local usage accounting",
       },
       {
-        id: "qwen-code",
-        autoSetup: "needs_quick_setup",
-        authentication: "companion_auth_oauth_token",
-        quota: "local_estimation",
-        quickSetupAnchor: "qwen-code",
-      },
-      {
         id: "alibaba-coding-plan",
         autoSetup: "yes",
         authentication: "opencode_auth_api_key",
         authFallbacks: ["env_api_key", "global_opencode_config"],
         quota: "local_estimation",
+      },
+      {
+        id: "alibaba-token-plan",
+        autoSetup: "needs_quick_setup",
+        authentication: "local_cli_auth",
+        quota: "local_cli_report",
+        quickSetupAnchor: "alibaba-personal-token-plan",
       },
       {
         id: "synthetic",
@@ -88,15 +90,7 @@ describe("provider-metadata", () => {
         quota: "remote_api",
       },
       {
-        id: "google-antigravity",
-        autoSetup: "needs_quick_setup",
-        authentication: "companion_auth_oauth_token",
-        quota: "remote_api",
-        quickSetupAnchor: "google-antigravity",
-      },
-      {
         id: "google-gemini-cli",
-        lifecycle: "deprecated",
         recommendedReplacementId: "google-agy",
         autoSetup: "needs_quick_setup",
         authentication: "companion_auth_oauth_token",
@@ -146,7 +140,14 @@ describe("provider-metadata", () => {
         quota: "remote_api",
       },
       {
-        id: "kimi-for-coding",
+        id: "kimi-code-plan-global",
+        autoSetup: "yes",
+        authentication: "opencode_auth_api_key",
+        authFallbacks: ["env_api_key", "global_opencode_config"],
+        quota: "remote_api",
+      },
+      {
+        id: "kimi-code-plan-cn",
         autoSetup: "yes",
         authentication: "opencode_auth_api_key",
         authFallbacks: ["env_api_key", "global_opencode_config"],
@@ -161,18 +162,19 @@ describe("provider-metadata", () => {
       },
       {
         id: "llmgate",
-        autoSetup: "yes",
+        autoSetup: "needs_quick_setup",
         authentication: "opencode_auth_oauth_token",
         quota: "remote_api",
-        notes: "separate provider caches gateway credential in OS keychain and stores access/refresh tokens in OpenCode auth metadata",
+        quickSetupAnchor: "llmgate",
+        notes: "reads the LLMGate provider's access/refresh token pair from OpenCode auth metadata",
       },
       {
         id: "vilao",
         autoSetup: "needs_quick_setup",
-        authentication: "opencode_auth_metadata_token",
+        authentication: "opencode_auth_api_key",
         quota: "remote_api",
         quickSetupAnchor: "vilao",
-        notes: "pay-as-you-go balance relative to the highest locally observed balance",
+        notes: "pay-as-you-go balance relative to the last locally observed balance",
       },
       {
         id: "xai",
@@ -191,19 +193,19 @@ describe("provider-metadata", () => {
       },
       {
         id: "opencode-go",
-        autoSetup: "needs_quick_setup",
-        authentication: "state_only",
+        autoSetup: "yes",
+        authentication: "opencode_auth_api_key",
+        authFallbacks: ["env_api_key", "global_opencode_config"],
         quota: "remote_api",
-        quickSetupAnchor: "opencode-go",
-        notes: "Scrapes the OpenCode Go dashboard; requires workspaceId and authCookie",
+        notes: "Reads the official OpenCode Go usage API through standard Go API-key sources",
       },
       {
         id: "opencode",
-        autoSetup: "needs_quick_setup",
-        authentication: "state_only",
+        autoSetup: "yes",
+        authentication: "opencode_auth_oauth_token",
         quota: "remote_api",
-        quickSetupAnchor: "opencode-zen",
-        notes: "Scrapes the OpenCode Zen billing page; requires workspaceId and authCookie",
+        notes:
+          "Reads the OpenCode Console billing, budget and usage APIs with your OpenCode Console sign-in",
       },
       {
         id: "ollama-cloud",
@@ -212,7 +214,7 @@ describe("provider-metadata", () => {
         authFallbacks: ["env_api_key", "global_opencode_config"],
         quota: "remote_api",
         notes:
-          "Queries the Ollama Cloud usage API; reports session and weekly quota plus model request counts",
+          "Queries the Ollama Cloud balance API; reports included credits or session and weekly limits, plus purchased credits",
       },
       {
         id: "quota-providers",
@@ -225,10 +227,10 @@ describe("provider-metadata", () => {
     ]);
   });
 
-  it("derives public metadata views from one canonical catalog", () => {
-    expect(Object.keys(QUOTA_PROVIDER_CATALOG)).toEqual(
-      QUOTA_PROVIDER_SHAPES.map((shape) => shape.id),
-    );
+  it("derives public metadata views from the ordered registration source", () => {
+    const registrationIds = QUOTA_PROVIDER_REGISTRATION_SOURCE.map(({ id }) => id);
+    expect(Object.keys(QUOTA_PROVIDER_CATALOG)).toEqual(registrationIds);
+    expect(QUOTA_PROVIDER_SHAPES.map((shape) => shape.id)).toEqual(registrationIds);
     for (const [id, entry] of Object.entries(QUOTA_PROVIDER_CATALOG)) {
       expect(entry.shape.id).toBe(id);
       expect(QUOTA_PROVIDER_LABELS[id]).toBe(entry.label);
@@ -243,12 +245,12 @@ describe("provider-metadata", () => {
   });
 
   it("preserves direct label aliases from the authored catalog", () => {
-    expect(QUOTA_PROVIDER_LABELS["minimax-cn-coding-plan"]).toBe("MiniMax Coding Plan (CN)");
-    expect(QUOTA_PROVIDER_LABELS["kimi-code"]).toBe("Kimi Code");
+    expect(QUOTA_PROVIDER_LABELS["minimax-cn-coding-plan"]).toBe("MiniMax Token Plan (CN)");
+    expect(QUOTA_PROVIDER_LABELS["kimi-code"]).toBe("Kimi Code (CN)");
     expect(QUOTA_PROVIDER_CATALOG["minimax-china-coding-plan"].labelAliases).toContain(
       "minimax-cn-coding-plan",
     );
-    expect(QUOTA_PROVIDER_CATALOG["kimi-for-coding"].labelAliases).toContain("kimi-code");
+    expect(QUOTA_PROVIDER_CATALOG["kimi-code-plan-cn"].labelAliases).toContain("kimi-code");
   });
 
   it("keeps canonical provider setup ids unique", () => {
@@ -277,11 +279,6 @@ describe("provider-metadata", () => {
     expect(QUOTA_PROVIDER_RUNTIME_IDS.cursor).toEqual(["cursor", "cursor-acp"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.synthetic).toEqual(["synthetic"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.chutes).toEqual(["chutes", "chutes-ai"]);
-    expect(QUOTA_PROVIDER_RUNTIME_IDS["google-antigravity"]).toEqual([
-      "google-antigravity",
-      "google",
-      "antigravity",
-    ]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS["google-gemini-cli"]).toEqual([
       "google-gemini-cli",
       "gemini-cli",
@@ -312,7 +309,9 @@ describe("provider-metadata", () => {
       "minimax-cn",
       "minimax-china",
     ]);
-    expect(QUOTA_PROVIDER_RUNTIME_IDS["kimi-for-coding"]).toEqual([
+    expect(QUOTA_PROVIDER_RUNTIME_IDS["kimi-code-plan-global"]).toEqual(["kimi-code-plan-global"]);
+    expect(QUOTA_PROVIDER_RUNTIME_IDS["kimi-code-plan-cn"]).toEqual([
+      "kimi-code-plan-cn",
       "kimi-for-coding",
       "kimi",
       "kimi-code",
@@ -342,11 +341,7 @@ describe("provider-metadata", () => {
     expect(getQuotaProviderRuntimeIds("kilo")).toEqual(["kilo"]);
     expect(getQuotaProviderRuntimeIds("kilo-gateway")).toEqual([]);
     expect(getQuotaProviderRuntimeIds("open-cursor")).toEqual(["cursor", "cursor-acp"]);
-    expect(getQuotaProviderRuntimeIds("google-antigravity")).toEqual([
-      "google-antigravity",
-      "google",
-      "antigravity",
-    ]);
+    expect(getQuotaProviderRuntimeIds("google-antigravity")).toEqual([]);
     expect(getQuotaProviderRuntimeIds("gemini-cli")).toEqual([
       "google-gemini-cli",
       "gemini-cli",
@@ -379,7 +374,18 @@ describe("provider-metadata", () => {
       "minimax-cn",
       "minimax-china",
     ]);
-    expect(getQuotaProviderRuntimeIds("kimi")).toEqual(["kimi-for-coding", "kimi", "kimi-code"]);
+    expect(getQuotaProviderRuntimeIds("kimi-code-plan-global")).toEqual(["kimi-code-plan-global"]);
+    expect(getQuotaProviderRuntimeIds("kimi")).toEqual([
+      "kimi-code-plan-cn",
+      "kimi-for-coding",
+      "kimi",
+      "kimi-code",
+    ]);
+    expect(getQuotaProviderIdsForRuntimeId("kimi-code-plan-global")).toEqual([
+      "kimi-code-plan-global",
+    ]);
+    expect(getQuotaProviderIdsForRuntimeId("kimi-code-plan-cn")).toEqual(["kimi-code-plan-cn"]);
+    expect(getQuotaProviderIdsForRuntimeId("kimi")).toEqual(["kimi-code-plan-cn"]);
     expect(getQuotaProviderRuntimeIds("deep-seek")).toEqual(["deepseek"]);
     expect(getQuotaProviderRuntimeIds("opencode-zen")).toEqual(["opencode", "opencode-zen"]);
     expect(getQuotaProviderRuntimeIds("xai")).toEqual(["xai"]);
@@ -409,16 +415,25 @@ describe("provider-metadata", () => {
       quota: "remote_api",
       notes: "OAuth for personal flow; PAT for managed billing",
     });
-    expect(getQuotaProviderShape("qwen")).toEqual({
-      id: "qwen-code",
-      autoSetup: "needs_quick_setup",
-      authentication: "companion_auth_oauth_token",
+    expect(getQuotaProviderShape("alibaba")).toEqual({
+      id: "alibaba-coding-plan",
+      autoSetup: "yes",
+      authentication: "opencode_auth_api_key",
+      authFallbacks: ["env_api_key", "global_opencode_config"],
       quota: "local_estimation",
-      quickSetupAnchor: "qwen-code",
     });
+    expect(getQuotaProviderShape("alibaba-token-plan")).toEqual({
+      id: "alibaba-token-plan",
+      autoSetup: "needs_quick_setup",
+      authentication: "local_cli_auth",
+      quota: "local_cli_report",
+      quickSetupAnchor: "alibaba-personal-token-plan",
+    });
+    expect(getQuotaProviderShape("alibaba-coding-plan")).not.toEqual(
+      getQuotaProviderShape("alibaba-token-plan"),
+    );
     expect(getQuotaProviderShape("gemini-cli")).toEqual({
       id: "google-gemini-cli",
-      lifecycle: "deprecated",
       recommendedReplacementId: "google-agy",
       autoSetup: "needs_quick_setup",
       authentication: "companion_auth_oauth_token",
@@ -441,11 +456,11 @@ describe("provider-metadata", () => {
     });
     expect(getQuotaProviderShape("opencode-zen")).toEqual({
       id: "opencode",
-      autoSetup: "needs_quick_setup",
-      authentication: "state_only",
+      autoSetup: "yes",
+      authentication: "opencode_auth_oauth_token",
       quota: "remote_api",
-      quickSetupAnchor: "opencode-zen",
-      notes: "Scrapes the OpenCode Zen billing page; requires workspaceId and authCookie",
+      notes:
+        "Reads the OpenCode Console billing, budget and usage APIs with your OpenCode Console sign-in",
     });
     expect(getQuotaProviderShape("kilo")).toEqual({
       id: "kilo",
@@ -472,25 +487,28 @@ describe("provider-metadata", () => {
       notes: "Reads the Xiaomi MiMo dashboard with a filtered trusted cookie",
     });
     expect(getQuotaProviderShape("not-a-provider")).toBeUndefined();
+    expect(getQuotaProviderShape("qwen-code")).toBeUndefined();
+    expect(getQuotaProviderShape("google-antigravity")).toBeUndefined();
   });
 
   it("returns display labels for known providers", () => {
     expect(getQuotaProviderDisplayLabel("anthropic")).toBe("Anthropic");
-    expect(getQuotaProviderDisplayLabel("google-antigravity")).toBe("Google");
     expect(getQuotaProviderDisplayLabel("gemini-cli")).toBe("Gemini CLI");
     expect(getQuotaProviderDisplayLabel("google-agy")).toBe("Google AGY");
     expect(getQuotaProviderDisplayLabel("cursor")).toBe("Cursor");
     expect(getQuotaProviderDisplayLabel("alibaba-coding-plan")).toBe("Alibaba Coding Plan");
+    expect(getQuotaProviderDisplayLabel("alibaba-token-plan")).toBe("Alibaba Personal Token Plan");
     expect(getQuotaProviderDisplayLabel("synthetic")).toBe("Synthetic");
     expect(getQuotaProviderDisplayLabel("zai")).toBe("Z.ai");
     expect(getQuotaProviderDisplayLabel("zhipu")).toBe("Zhipu");
     expect(getQuotaProviderDisplayLabel("zhipu-coding-plan")).toBe("Zhipu");
     expect(getQuotaProviderDisplayLabel("nanogpt")).toBe("NanoGPT");
     expect(getQuotaProviderDisplayLabel("nano-gpt")).toBe("NanoGPT");
-    expect(getQuotaProviderDisplayLabel("minimax")).toBe("MiniMax Coding Plan");
-    expect(getQuotaProviderDisplayLabel("minimax-cn-coding-plan")).toBe("MiniMax Coding Plan (CN)");
-    expect(getQuotaProviderDisplayLabel("kimi-code")).toBe("Kimi Code");
-    expect(getQuotaProviderDisplayLabel("kimi")).toBe("Kimi Code");
+    expect(getQuotaProviderDisplayLabel("minimax")).toBe("MiniMax Token Plan");
+    expect(getQuotaProviderDisplayLabel("minimax-cn-coding-plan")).toBe("MiniMax Token Plan (CN)");
+    expect(getQuotaProviderDisplayLabel("kimi-code-plan-global")).toBe("Kimi Code");
+    expect(getQuotaProviderDisplayLabel("kimi-code")).toBe("Kimi Code (CN)");
+    expect(getQuotaProviderDisplayLabel("kimi")).toBe("Kimi Code (CN)");
     expect(getQuotaProviderDisplayLabel("deep-seek")).toBe("DeepSeek");
     expect(getQuotaProviderDisplayLabel("opencode-zen")).toBe("OpenCode Zen");
     expect(getQuotaProviderDisplayLabel("kilo")).toBe("Kilo Gateway");

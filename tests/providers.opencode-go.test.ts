@@ -1,571 +1,977 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
 import {
   expectAttemptedWithErrorLabel,
   expectAttemptedWithNoErrors,
   expectNotAttempted,
   visibleEntries,
 } from "./helpers/provider-assertions.js";
+import { createProviderAvailabilityContext } from "./helpers/provider-test-harness.js";
 
-const mocks = vi.hoisted(() => {
-  const fetchResponse = vi.fn();
+const mocks = vi.hoisted(() => ({
+  resolveOpenCodeGoAuthCached: vi.fn(),
+  resolveOpenCodeGoAuth: vi.fn(),
+  getOpenCodeGoAuthDiagnostics: vi.fn(),
+  queryOpenCodeGoQuota: vi.fn(),
+  queryOpenCodeGoConsoleStatus: vi.fn(),
+  resolveOpenCodeConsoleAuth: vi.fn(),
+}));
+
+vi.mock("../src/lib/opencode-go-auth.js", () => ({
+  DEFAULT_OPENCODE_GO_AUTH_CACHE_MAX_AGE_MS: 5_000,
+  OPENCODE_GO_CREDENTIAL_INTEGRATION_IDS: ["opencode-go", "opencode"],
+  resolveOpenCodeGoAuthCached: mocks.resolveOpenCodeGoAuthCached,
+  getOpenCodeGoAuthDiagnostics: mocks.getOpenCodeGoAuthDiagnostics,
+  resolveOpenCodeGoAuth: mocks.resolveOpenCodeGoAuth,
+}));
+
+vi.mock("../src/lib/opencode-go.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../src/lib/opencode-go.js")>();
   return {
-    fetchResponse,
-    fetchWithTimeout: vi.fn(
-      async (
-        _url: string,
-        options: {
-          consume: (response: Response, signal: AbortSignal) => Promise<unknown> | unknown;
-        },
-      ) => {
-        const response = await fetchResponse();
-        return await options.consume(response, new AbortController().signal);
-      },
-    ),
-    resolveOpenCodeGoConfigCached: vi.fn(),
+    ...original,
+    queryOpenCodeGoQuota: mocks.queryOpenCodeGoQuota,
+    queryOpenCodeGoConsoleStatus: mocks.queryOpenCodeGoConsoleStatus,
   };
 });
 
-vi.mock("../src/lib/opencode-go-config.js", () => ({
-  resolveOpenCodeGoConfigCached: mocks.resolveOpenCodeGoConfigCached,
-  getOpenCodeGoConfigDiagnostics: vi.fn(async () => ({
-    state: "configured",
-    source: "test",
-    missing: null,
-    error: null,
-    checkedPaths: [],
-  })),
-  DEFAULT_OPENCODE_GO_CONFIG_CACHE_MAX_AGE_MS: 30_000,
+vi.mock("../src/lib/opencode-console-auth.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/lib/opencode-console-auth.js")>()),
+  resolveOpenCodeConsoleAuth: mocks.resolveOpenCodeConsoleAuth,
 }));
 
-vi.mock("../src/lib/http.js", () => ({
-  fetchWithTimeout: mocks.fetchWithTimeout,
+vi.mock("../src/lib/opencode-auth.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/lib/opencode-auth.js")>()),
+  readCredentialRows: vi.fn().mockResolvedValue([]),
 }));
 
-import { _parseDataSlotFormat, _parseWindowUsage } from "../src/lib/opencode-go.js";
-import { opencodeGoProvider } from "../src/providers/opencode-go.js";
+import {
+  __resetOpenCodeGoNotSubscribedForTests,
+  opencodeGoProvider,
+} from "../src/providers/opencode-go.js";
 
-function mockConfigNone() {
-  mocks.resolveOpenCodeGoConfigCached.mockResolvedValueOnce({ state: "none" });
+function successfulResult() {
+  return {
+    success: true as const,
+    rolling: {
+      status: "ok" as const,
+      usagePercent: 12.5,
+      percentRemaining: 87.5,
+      resetTimeIso: "2026-08-12T12:30:00.000Z",
+    },
+    weekly: {
+      status: "ok" as const,
+      usagePercent: 45,
+      percentRemaining: 55,
+      resetTimeIso: "2026-08-16T16:00:00.000Z",
+    },
+    monthly: {
+      status: "ok" as const,
+      usagePercent: 80,
+      percentRemaining: 20,
+      resetTimeIso: "2026-09-01T04:00:00.000Z",
+    },
+  };
 }
 
-function mockConfigIncomplete(source = "env", missing = "OPENCODE_GO_AUTH_COOKIE") {
-  mocks.resolveOpenCodeGoConfigCached.mockResolvedValueOnce({
-    state: "incomplete",
-    source,
-    missing,
-  });
+function diagnostics(
+  state: "none" | "configured" | "invalid" = "configured",
+): Record<string, unknown> {
+  return {
+    state,
+    source: state === "none" ? null : "opencode.db",
+    checkedPaths: ["env:OPENCODE_API_KEY", "/tmp/opencode.json"],
+    credentialDatabasePaths: ["/tmp/opencode.db"],
+    ...(state === "invalid" ? { error: "OpenCode Go auth entry present but key is empty" } : {}),
+  };
 }
 
-function mockConfigInvalid(
-  source = "/tmp/opencode-go.json",
-  error = "Failed to parse JSON: Unexpected end of JSON input",
+async function runFetch(
+  opencodeGoWindows: Array<"rolling" | "weekly" | "monthly"> = ["rolling", "weekly", "monthly"],
+  requestTimeoutMs = 5_000,
 ) {
-  mocks.resolveOpenCodeGoConfigCached.mockResolvedValueOnce({
-    state: "invalid",
-    source,
-    error,
-  });
-}
-
-function mockConfigConfigured(workspaceId = "ws-123", authCookie = "cookie-abc") {
-  mocks.resolveOpenCodeGoConfigCached.mockResolvedValueOnce({
-    state: "configured",
-    config: { workspaceId, authCookie },
-    source: "env",
-  });
-}
-
-type OpenCodeGoTestWindow = "rolling" | "weekly" | "monthly";
-
-const DASHBOARD_FIELD_BY_WINDOW: Record<OpenCodeGoTestWindow, string> = {
-  rolling: "rollingUsage",
-  weekly: "weeklyUsage",
-  monthly: "monthlyUsage",
-};
-
-function buildDashboardHtml(
-  rollingUsagePercent: number,
-  rollingResetInSec: number,
-  weeklyUsagePercent: number,
-  weeklyResetInSec: number,
-  monthlyUsagePercent: number,
-  monthlyResetInSec: number,
-): string {
-  return buildPartialDashboardHtml({
-    rolling: [rollingUsagePercent, rollingResetInSec],
-    weekly: [weeklyUsagePercent, weeklyResetInSec],
-    monthly: [monthlyUsagePercent, monthlyResetInSec],
-  });
-}
-
-function buildDashboardHtmlResetFirst(
-  rollingUsagePercent: number,
-  rollingResetInSec: number,
-  weeklyUsagePercent: number,
-  weeklyResetInSec: number,
-  monthlyUsagePercent: number,
-  monthlyResetInSec: number,
-): string {
-  return `<html><script>rollingUsage:$R[10]={resetInSec:${rollingResetInSec},usagePercent:${rollingUsagePercent}}weeklyUsage:$R[11]={resetInSec:${weeklyResetInSec},usagePercent:${weeklyUsagePercent}}monthlyUsage:$R[12]={resetInSec:${monthlyResetInSec},usagePercent:${monthlyUsagePercent}}</script></html>`;
-}
-
-function buildPartialDashboardHtml(
-  windows: Partial<Record<OpenCodeGoTestWindow, [usagePercent: number, resetInSec: number]>>,
-): string {
-  const chunks = (["rolling", "weekly", "monthly"] as const)
-    .map((window, index) => {
-      const usage = windows[window];
-      if (!usage) return "";
-      const [usagePercent, resetInSec] = usage;
-      return `${DASHBOARD_FIELD_BY_WINDOW[window]}:$R[${10 + index}]={usagePercent:${usagePercent},resetInSec:${resetInSec}}`;
-    })
-    .join("");
-
-  return `<html><script>${chunks}</script></html>`;
-}
-
-/**
- * Build HTML in the newer data-slot format (as seen in the dashboard after OpenCode UI changes).
- */
-function buildDataSlotDashboardHtml(
-  rollingUsagePercent: number,
-  rollingResetTime: string,
-  weeklyUsagePercent: number,
-  weeklyResetTime: string,
-  monthlyUsagePercent: number,
-  monthlyResetTime: string,
-): string {
-  return `<div data-slot="usage"><!--$-->
-    <div data-slot="usage-item">
-      <div data-slot="usage-header"><span data-slot="usage-label">Rolling Usage</span><span data-slot="usage-value"><!--$-->${rollingUsagePercent}<!--/-->%</span></div>
-      <div data-slot="progress"><div data-slot="progress-bar" style="width: ${rollingUsagePercent}%;"></div></div>
-      <span data-slot="reset-time"><!--$-->Resets in<!--/--> <!--$-->${rollingResetTime}<!--/--></span>
-    </div>
-    <div data-slot="usage-item">
-      <div data-slot="usage-header"><span data-slot="usage-label">Weekly Usage</span><span data-slot="usage-value"><!--$-->${weeklyUsagePercent}<!--/-->%</span></div>
-      <div data-slot="progress"><div data-slot="progress-bar" style="width: ${weeklyUsagePercent}%;"></div></div>
-      <span data-slot="reset-time"><!--$-->Resets in<!--/--> <!--$-->${weeklyResetTime}<!--/--></span>
-    </div>
-    <div data-slot="usage-item">
-      <div data-slot="usage-header"><span data-slot="usage-label">Monthly Usage</span><span data-slot="usage-value"><!--$-->${monthlyUsagePercent}<!--/-->%</span></div>
-      <div data-slot="progress"><div data-slot="progress-bar" style="width: ${monthlyUsagePercent}%;"></div></div>
-      <span data-slot="reset-time"><!--$-->Resets in<!--/--> <!--$-->${monthlyResetTime}<!--/--></span>
-    </div>
-  </div>`;
-}
-
-/**
- * Build HTML with only data-slot format (no SolidJS SSR variables).
- */
-function buildDataSlotOnlyHtml(
-  windows: Partial<Record<OpenCodeGoTestWindow, [usagePercent: number, resetTime: string]>>,
-): string {
-  const items = (["rolling", "weekly", "monthly"] as const)
-    .map((window) => {
-      const usage = windows[window];
-      if (!usage) return "";
-      const [usagePercent, resetTime] = usage;
-      const label =
-        window === "rolling"
-          ? "Rolling Usage"
-          : window === "weekly"
-            ? "Weekly Usage"
-            : "Monthly Usage";
-      return `<div data-slot="usage-item">
-        <div data-slot="usage-header"><span data-slot="usage-label">${label}</span><span data-slot="usage-value"><!--$-->${usagePercent}<!--/-->%</span></div>
-        <div data-slot="progress"><div data-slot="progress-bar" style="width: ${usagePercent}%;"></div></div>
-        <span data-slot="reset-time"><!--$-->Resets in<!--/--> <!--$-->${resetTime}<!--/--></span>
-      </div>`;
-    })
-    .join("");
-
-  return `<div data-slot="usage"><!--$-->${items}</div>`;
-}
-
-function mockDashboardSuccess(html: string) {
-  mocks.fetchResponse.mockResolvedValueOnce({
-    ok: true,
-    text: async () => html,
-  });
-}
-
-function mockDashboardHttpFailure(status: number, text: string) {
-  mocks.fetchResponse.mockResolvedValueOnce({
-    ok: false,
-    status,
-    text: async () => text,
-  });
-}
-
-async function runProviderFetch(opencodeGoWindows?: Array<"rolling" | "weekly" | "monthly">) {
-  return opencodeGoProvider.fetch({ config: { opencodeGoWindows } } as any);
-}
-
-async function runProviderFetchWithConfig(config: Record<string, unknown>) {
-  return opencodeGoProvider.fetch({ config } as any);
+  return opencodeGoProvider.fetch(
+    createProviderAvailabilityContext({
+      configOverrides: { opencodeGoWindows, requestTimeoutMs },
+    }),
+  );
 }
 
 describe("opencode-go provider", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    __resetOpenCodeGoNotSubscribedForTests();
+    mocks.getOpenCodeGoAuthDiagnostics.mockResolvedValue(diagnostics());
+    mocks.resolveOpenCodeGoAuthCached.mockResolvedValue({
+      state: "configured",
+      apiKey: "provider-test-token",
+    });
+    mocks.queryOpenCodeGoQuota.mockResolvedValue(successfulResult());
+    mocks.resolveOpenCodeGoAuth.mockReturnValue({ state: "configured", apiKey: "row-token" });
+    mocks.resolveOpenCodeConsoleAuth.mockResolvedValue({ state: "none" });
   });
 
-  it("preserves the OpenCode Go scrape timeout default unless requestTimeoutMs is user-configured", async () => {
-    mockConfigConfigured();
-    mockDashboardSuccess(buildDashboardHtml(7, 18000, 2, 540000, 16, 2480000));
+  function consoleConfigured(): void {
+    mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce({
+      state: "configured",
+      credential: { accessToken: "console-access", orgId: "wrk_1" },
+    });
+  }
 
-    await runProviderFetchWithConfig({ requestTimeoutMs: 5000 });
-    expect(mocks.fetchWithTimeout).toHaveBeenLastCalledWith(
-      expect.any(String),
-      expect.objectContaining({ timeoutMs: 10_000, consume: expect.any(Function) }),
+  function consoleSuccess(): void {
+    mocks.queryOpenCodeGoConsoleStatus.mockResolvedValueOnce({
+      success: true,
+      rolling: {
+        status: "ok",
+        usagePercent: 0,
+        percentRemaining: 100,
+        resetTimeIso: "2026-09-23T18:59:07.061Z",
+      },
+      weekly: {
+        status: "ok",
+        usagePercent: 27,
+        percentRemaining: 73,
+        resetTimeIso: "2026-09-28T00:00:00.000Z",
+      },
+      monthly: {
+        status: "rate-limited",
+        usagePercent: 100,
+        percentRemaining: 0,
+        resetTimeIso: "2026-10-02T12:48:59.000Z",
+      },
+    });
+  }
+
+  it("reads Go windows from the console API when a console credential exists", async () => {
+    consoleConfigured();
+    consoleSuccess();
+
+    const out = await runFetch();
+
+    expect(mocks.queryOpenCodeGoConsoleStatus).toHaveBeenCalledWith(
+      { accessToken: "console-access", orgId: "wrk_1" },
+      { requestTimeoutMs: 5_000 },
     );
-
-    mockConfigConfigured();
-    mockDashboardSuccess(buildDashboardHtml(7, 18000, 2, 540000, 16, 2480000));
-
-    await runProviderFetchWithConfig({ requestTimeoutMs: 12000, requestTimeoutMsConfigured: true });
-    expect(mocks.fetchWithTimeout).toHaveBeenLastCalledWith(
-      expect.any(String),
-      expect.objectContaining({ timeoutMs: 12000, consume: expect.any(Function) }),
+    expect(mocks.queryOpenCodeGoQuota).not.toHaveBeenCalled();
+    expect(out.statusDetails).toEqual(
+      expect.arrayContaining([
+        { key: "go_source", value: "console" },
+        { key: "console_server", value: "https://opencode.ai/console" },
+      ]),
     );
-  });
-
-  it("returns attempted:false when config is none", async () => {
-    mockConfigNone();
-    const out = await runProviderFetch();
-    expectNotAttempted(out);
-  });
-
-  it("returns error when config is incomplete", async () => {
-    mockConfigIncomplete();
-    const out = await runProviderFetch();
-    expectAttemptedWithErrorLabel(out, "OpenCode Go");
-    expect(out.errors[0]?.message).toContain("OPENCODE_GO_AUTH_COOKIE");
-  });
-
-  it("returns error when config is invalid", async () => {
-    mockConfigInvalid();
-    const out = await runProviderFetch();
-    expectAttemptedWithErrorLabel(out, "OpenCode Go");
-    expect(out.errors[0]?.message).toContain("Invalid config");
-    expect(out.errors[0]?.message).toContain("/tmp/opencode-go.json");
-    expect(mocks.fetchWithTimeout).not.toHaveBeenCalled();
-  });
-
-  it("returns usage entries on successful dashboard scrape", async () => {
-    mockConfigConfigured();
-    mockDashboardSuccess(buildDashboardHtml(7, 18000, 2, 540000, 16, 2480000));
-
-    const out = await runProviderFetch();
-
-    expectAttemptedWithNoErrors(out);
-    expect(out.entries).toHaveLength(3);
-    expect(out.entries[0]).toMatchObject({
-      name: "OpenCode Go 5h",
-      group: "OpenCode Go",
-      label: "5h:",
-      percentRemaining: 93,
-    });
-    expect(out.entries[0]).toHaveProperty("resetTimeIso");
-    expect(out.entries[1]).toMatchObject({
-      name: "OpenCode Go Weekly",
-      group: "OpenCode Go",
-      label: "Weekly:",
-      percentRemaining: 98,
-    });
-    expect(out.entries[1]).toHaveProperty("resetTimeIso");
-    expect(out.entries[2]).toMatchObject({
-      name: "OpenCode Go Monthly",
-      group: "OpenCode Go",
-      label: "Monthly:",
-      percentRemaining: 84,
-    });
-    expect(out.entries[2]).toHaveProperty("resetTimeIso");
-  });
-
-  it("parses decimal dashboard usage values", async () => {
-    mockConfigConfigured();
-    mockDashboardSuccess(buildDashboardHtml(7.5, 18000, 2.25, 540000, 16.75, 2480000));
-
-    const out = await runProviderFetch();
-
-    expectAttemptedWithNoErrors(out);
-    expect(out.entries[0]).toMatchObject({ percentRemaining: 92.5 });
-    expect(out.entries[1]).toMatchObject({ percentRemaining: 97.75 });
-    expect(out.entries[2]).toMatchObject({ percentRemaining: 83.25 });
-  });
-
-  it("filters windows based on opencodeGoWindows config", async () => {
-    mockConfigConfigured();
-    mockDashboardSuccess(buildDashboardHtml(7, 18000, 2, 540000, 16, 2480000));
-
-    const out = await runProviderFetch(["weekly"]);
-
-    expectAttemptedWithNoErrors(out);
-    expect(out.entries).toHaveLength(1);
-    expect(out.entries[0]).toMatchObject({
-      name: "OpenCode Go Weekly",
-      group: "OpenCode Go",
-      label: "Weekly:",
-      percentRemaining: 98,
-    });
-  });
-
-  it("defaults to available windows when opencodeGoWindows is not set", async () => {
-    mockConfigConfigured();
-    mockDashboardSuccess(
-      buildPartialDashboardHtml({ rolling: [7, 18000], monthly: [16, 2480000] }),
-    );
-
-    const out = await runProviderFetch();
-
-    expectAttemptedWithNoErrors(out);
-    expect(out.entries.map((entry) => entry.name)).toEqual([
-      "OpenCode Go 5h",
-      "OpenCode Go Monthly",
-    ]);
-  });
-
-  it("succeeds when weekly is selected and only weeklyUsage is present", async () => {
-    mockConfigConfigured();
-    mockDashboardSuccess(buildPartialDashboardHtml({ weekly: [2, 540000] }));
-
-    const out = await runProviderFetch(["weekly"]);
-
-    expectAttemptedWithNoErrors(out);
-    expect(out.entries).toHaveLength(1);
-    expect(out.entries[0]).toMatchObject({
-      name: "OpenCode Go Weekly",
-      group: "OpenCode Go",
-      label: "Weekly:",
-      percentRemaining: 98,
-    });
-  });
-
-  it("returns a clear error when a selected weekly window is missing", async () => {
-    mockConfigConfigured();
-    mockDashboardSuccess(
-      buildPartialDashboardHtml({ rolling: [7, 18000], monthly: [16, 2480000] }),
-    );
-
-    const out = await runProviderFetch(["weekly"]);
-
-    expectAttemptedWithErrorLabel(out, "OpenCode Go");
-    expect(out.entries).toHaveLength(0);
-    expect(out.errors[0]?.message).toContain("weekly");
-    expect(out.errors[0]?.message).toContain("weeklyUsage");
-  });
-
-  it("supports custom window combinations", async () => {
-    mockConfigConfigured();
-    mockDashboardSuccess(buildDashboardHtml(7, 18000, 2, 540000, 16, 2480000));
-
-    const out = await runProviderFetch(["rolling", "monthly"]);
-
-    expectAttemptedWithNoErrors(out);
-    expect(out.entries).toHaveLength(2);
-    expect(out.entries[0]).toMatchObject({ name: "OpenCode Go 5h" });
-    expect(out.entries[1]).toMatchObject({ name: "OpenCode Go Monthly" });
-  });
-
-  it("keeps selected windows in canonical order", async () => {
-    mockConfigConfigured();
-    mockDashboardSuccess(buildDashboardHtml(7, 18000, 2, 540000, 16, 2480000));
-
-    const out = await runProviderFetch(["weekly", "monthly", "rolling"]);
-
-    expectAttemptedWithNoErrors(out);
-    expect(out.entries.map((entry) => entry.name)).toEqual([
+    const visible = visibleEntries(out.entries, "opencode-go");
+    expect(visible.map((entry) => entry.name)).toEqual([
       "OpenCode Go 5h",
       "OpenCode Go Weekly",
       "OpenCode Go Monthly",
     ]);
   });
 
-  it("treats reordered full window selection as the default missing-window-tolerant selection", async () => {
-    mockConfigConfigured();
-    mockDashboardSuccess(
-      buildPartialDashboardHtml({ rolling: [7, 18000], monthly: [16, 2480000] }),
+  it("reports a console not-subscribed state without errors", async () => {
+    consoleConfigured();
+    mocks.queryOpenCodeGoConsoleStatus.mockResolvedValueOnce({
+      success: false,
+      error: "OpenCode Go subscription not found for this console account (404)",
+      notSubscribed: true,
+    });
+
+    const out = await runFetch();
+
+    expectAttemptedWithNoErrors(out);
+    expect(out.entries).toEqual([]);
+    expect(out.statusDetails).toEqual(
+      expect.arrayContaining([{ key: "opencode_go_state", value: "not_subscribed" }]),
+    );
+    expect(mocks.queryOpenCodeGoQuota).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the legacy key path when the console request fails", async () => {
+    consoleConfigured();
+    mocks.queryOpenCodeGoConsoleStatus.mockResolvedValueOnce({
+      success: false,
+      error: "OpenCode Console API error 500 (/api/go/status)",
+      retryable: true,
+    });
+
+    const out = await runFetch();
+
+    expect(mocks.queryOpenCodeGoConsoleStatus).toHaveBeenCalledOnce();
+    expect(mocks.queryOpenCodeGoQuota).toHaveBeenCalledOnce();
+    expect(out.statusDetails).toEqual(
+      expect.arrayContaining([
+        { key: "go_source", value: "legacy_key" },
+        { key: "console_error", value: "OpenCode Console API error 500 (/api/go/status)" },
+      ]),
+    );
+  });
+
+  it("falls back to the API key after a Console 403", async () => {
+    consoleConfigured();
+    mocks.queryOpenCodeGoConsoleStatus.mockResolvedValueOnce({
+      success: false,
+      error: "OpenCode Console API error 403 (/api/go/status)",
+      retryable: false,
+    });
+
+    const out = await runFetch();
+
+    expect(mocks.queryOpenCodeGoQuota).toHaveBeenCalledOnce();
+    expectAttemptedWithNoErrors(out);
+    expect(visibleEntries(out.entries, "opencode-go")).toHaveLength(3);
+    expect(out.statusDetails).toEqual(
+      expect.arrayContaining([
+        { key: "go_source", value: "legacy_key" },
+        { key: "console_error", value: "OpenCode Console API error 403 (/api/go/status)" },
+      ]),
+    );
+    expect(out.statusDetails).not.toContainEqual({
+      key: "opencode_go_state",
+      value: "not_subscribed",
+    });
+  });
+
+  it("stays quiet after a Console 403 when there is no API key", async () => {
+    consoleConfigured();
+    mocks.queryOpenCodeGoConsoleStatus.mockResolvedValueOnce({
+      success: false,
+      error: "OpenCode Console API error 403 (/api/go/status)",
+      retryable: false,
+    });
+    mocks.getOpenCodeGoAuthDiagnostics.mockResolvedValueOnce(diagnostics("none"));
+    mocks.resolveOpenCodeGoAuthCached.mockResolvedValueOnce({ state: "none" });
+
+    const out = await runFetch();
+
+    expect(mocks.queryOpenCodeGoQuota).not.toHaveBeenCalled();
+    expectNotAttempted(out);
+    expect(out.statusDetails).toEqual(
+      expect.arrayContaining([
+        { key: "console_auth_state", value: "configured" },
+        { key: "console_error", value: "OpenCode Console API error 403 (/api/go/status)" },
+      ]),
+    );
+  });
+
+  it("reports the console server the sign-in belongs to", async () => {
+    mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce({
+      state: "configured",
+      credential: { accessToken: "console-access", server: "https://console.example.test" },
+    });
+    consoleSuccess();
+
+    const out = await runFetch();
+
+    expect(out.statusDetails).toContainEqual({
+      key: "console_server",
+      value: "https://console.example.test",
+    });
+  });
+
+  it("uses the legacy key path with the console error when the sign-in cannot be read", async () => {
+    const jwt = `eyJ${"a".repeat(24)}.${"b".repeat(24)}.${"c".repeat(24)}`;
+    mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce({
+      state: "invalid",
+      error: `refresh_failed: HTTP 401 ${jwt}`,
+    });
+
+    const out = await runFetch();
+
+    expect(mocks.queryOpenCodeGoConsoleStatus).not.toHaveBeenCalled();
+    expect(mocks.queryOpenCodeGoQuota).toHaveBeenCalledOnce();
+    expectAttemptedWithNoErrors(out);
+    expect(out.statusDetails).toEqual(
+      expect.arrayContaining([
+        { key: "auth_state", value: "configured" },
+        { key: "console_auth_state", value: "invalid" },
+        { key: "console_error", value: "refresh_failed: HTTP 401 [redacted]" },
+        { key: "go_source", value: "legacy_key" },
+        { key: "selected_windows", value: "rolling,weekly,monthly" },
+      ]),
+    );
+    expect(JSON.stringify(out)).not.toContain(jwt);
+  });
+
+  it("shows the failed Console sign-in as Go's error when there is no API key", async () => {
+    const jwt = `eyJ${"a".repeat(24)}.${"b".repeat(24)}.${"c".repeat(24)}`;
+    mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce({
+      state: "invalid",
+      error: `refresh_failed: HTTP 401 ${jwt}`,
+    });
+    mocks.getOpenCodeGoAuthDiagnostics.mockResolvedValueOnce(diagnostics("none"));
+    mocks.resolveOpenCodeGoAuthCached.mockResolvedValueOnce({ state: "none" });
+
+    const out = await runFetch();
+
+    expect(mocks.queryOpenCodeGoQuota).not.toHaveBeenCalled();
+    expect(out.attempted).toBe(true);
+    expect(out.entries).toEqual([]);
+    expect(out.errors).toEqual([
+      {
+        label: "OpenCode Go",
+        message:
+          "OpenCode Console sign-in failed: refresh_failed: HTTP 401 [redacted]. Run `opencode auth login opencode`.",
+      },
+    ]);
+    expect(out.statusDetails).toEqual(
+      expect.arrayContaining([
+        { key: "console_auth_state", value: "invalid" },
+        { key: "go_source", value: "legacy_key" },
+      ]),
+    );
+    expect(JSON.stringify(out)).not.toContain(jwt);
+  });
+
+  it.each([
+    ["a 5xx answer", "OpenCode Console API error 500 (/api/go/status)"],
+    ["a network failure", "fetch failed"],
+    ["a timeout", "Request timeout after 5s"],
+  ])("stays quiet after %s from the Console when there is no API key", async (_case, error) => {
+    consoleConfigured();
+    mocks.queryOpenCodeGoConsoleStatus.mockResolvedValueOnce({
+      success: false,
+      error,
+      retryable: true,
+    });
+    mocks.getOpenCodeGoAuthDiagnostics.mockResolvedValueOnce(diagnostics("none"));
+    mocks.resolveOpenCodeGoAuthCached.mockResolvedValueOnce({ state: "none" });
+
+    const out = await runFetch();
+
+    expect(mocks.queryOpenCodeGoQuota).not.toHaveBeenCalled();
+    expectNotAttempted(out);
+    expect(out.errors).toEqual([]);
+    expect(out.statusDetails).toEqual(
+      expect.arrayContaining([
+        { key: "console_auth_state", value: "configured" },
+        { key: "console_error", value: error },
+      ]),
+    );
+  });
+
+  it("stays quiet without a Console sign-in or an API key", async () => {
+    mocks.getOpenCodeGoAuthDiagnostics.mockResolvedValueOnce(diagnostics("none"));
+    mocks.resolveOpenCodeGoAuthCached.mockResolvedValueOnce({ state: "none" });
+
+    const out = await runFetch();
+
+    expectNotAttempted(out);
+    expect(out.errors).toEqual([]);
+  });
+
+  it("keeps the plain key path when the opencode login is an API key", async () => {
+    mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce({ state: "none", reason: "not_oauth" });
+
+    const out = await runFetch();
+
+    expect(mocks.queryOpenCodeGoConsoleStatus).not.toHaveBeenCalled();
+    expect(mocks.queryOpenCodeGoQuota).toHaveBeenCalledOnce();
+    expect(out.statusDetails?.map((detail) => detail.key)).not.toContain("console_auth_state");
+  });
+
+  it("returns not attempted for absent auth without calling the API", async () => {
+    mocks.getOpenCodeGoAuthDiagnostics.mockResolvedValueOnce(diagnostics("none"));
+    mocks.resolveOpenCodeGoAuthCached.mockResolvedValueOnce({ state: "none" });
+
+    const out = await runFetch();
+
+    expectNotAttempted(out);
+    expect(mocks.queryOpenCodeGoQuota).not.toHaveBeenCalled();
+    expect(out.statusDetails).toEqual(
+      expect.arrayContaining([
+        { key: "auth_state", value: "none" },
+        { key: "auth_source", value: "(none)" },
+        { key: "selected_windows", value: "rolling,weekly,monthly" },
+      ]),
+    );
+  });
+
+  it("returns an attempted error for invalid canonical auth", async () => {
+    const error = "OpenCode Go auth entry present but key is empty";
+    mocks.getOpenCodeGoAuthDiagnostics.mockResolvedValueOnce(diagnostics("invalid"));
+    mocks.resolveOpenCodeGoAuthCached.mockResolvedValueOnce({ state: "invalid", error });
+
+    const out = await runFetch();
+
+    expectAttemptedWithErrorLabel(out, "OpenCode Go");
+    expect(out.errors[0]?.message).toBe(error);
+    expect(out.statusDetails).toContainEqual({ key: "auth_error", value: error });
+    expect(mocks.queryOpenCodeGoQuota).not.toHaveBeenCalled();
+  });
+
+  it("keeps a valid inactive duplicate-label database credential when the active row is invalid", async () => {
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    mocks.getOpenCodeGoAuthDiagnostics.mockResolvedValueOnce(diagnostics("invalid"));
+    mocks.resolveOpenCodeGoAuthCached.mockResolvedValueOnce({
+      state: "invalid",
+      error: "empty key",
+    });
+    (readCredentialRows as any).mockResolvedValueOnce([
+      {
+        id: "bad",
+        integrationId: "opencode-go",
+        label: "shared",
+        active: true,
+        value: { key: "" },
+      },
+      {
+        id: "good",
+        integrationId: "opencode-go",
+        label: "shared",
+        active: false,
+        value: { key: "ok" },
+      },
+    ]);
+    mocks.resolveOpenCodeGoAuth.mockImplementation((auth: any) =>
+      auth["opencode-go"].key
+        ? { state: "configured", apiKey: "row-token" }
+        : { state: "invalid", error: "empty key" },
     );
 
-    const out = await runProviderFetch(["weekly", "monthly", "rolling"]);
+    const out = await runFetch();
+    expect(out.errors).toContainEqual({
+      label: "[OpenCode Go shared] (active)",
+      message: "empty key",
+    });
+    expect(out.entries).toContainEqual(
+      expect.objectContaining({
+        group: "[OpenCode Go shared 2]",
+        accounting: expect.objectContaining({ sourceId: "good" }),
+      }),
+    );
+    expect(out.entries).toHaveLength(3);
+    expect(mocks.queryOpenCodeGoQuota).toHaveBeenCalledOnce();
+  });
+
+  it("keeps two failed database logins as two error rows", async () => {
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    const failed = (id: string, label: string, active: boolean) => ({
+      id,
+      integrationId: "opencode-go",
+      label,
+      active,
+      value: { type: "api" },
+      resolveError: "active_failed: database is locked",
+    });
+    (readCredentialRows as any).mockResolvedValueOnce([
+      failed("cred_personal", "Personal", true),
+      failed("cred_work", "Work", false),
+    ]);
+    mocks.resolveOpenCodeGoAuth.mockImplementation((auth: any) => ({
+      state: "invalid",
+      error: `OpenCode could not read this login: ${auth["opencode-go"].resolveError}`,
+    }));
+
+    const out = await runFetch();
+
+    const message = "OpenCode could not read this login: active_failed: database is locked";
+    expect(out.errors).toEqual([
+      { label: "[OpenCode Go Personal] (active)", message },
+      { label: "[OpenCode Go Work]", message },
+    ]);
+    expect(mocks.queryOpenCodeGoQuota).not.toHaveBeenCalled();
+  });
+
+  it("reports one Go connection when the same key is stored under both integrations", async () => {
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    const workspaceCredential = { type: "key", key: "workspace-key" };
+    (readCredentialRows as any).mockResolvedValueOnce([
+      {
+        id: "go-row",
+        integrationId: "opencode-go",
+        label: "default",
+        active: false,
+        value: workspaceCredential,
+      },
+      {
+        id: "zen-row",
+        integrationId: "opencode",
+        label: "default",
+        active: false,
+        value: workspaceCredential,
+      },
+    ]);
+    mocks.resolveOpenCodeGoAuth.mockReturnValue({ state: "configured", apiKey: "row-token" });
+
+    const out = await runFetch(["rolling", "weekly"]);
+
+    expect(mocks.queryOpenCodeGoQuota).toHaveBeenCalledOnce();
+    expect(visibleEntries(out.entries, "opencode-go").map((entry) => entry.group)).toEqual([
+      "[OpenCode Go]",
+      "[OpenCode Go]",
+    ]);
+    for (const entry of out.entries) {
+      expect(entry.accounting).toMatchObject({ sourceId: "go-row" });
+    }
+  });
+
+  it("does not report another integration's credential as a second Go connection", async () => {
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    (readCredentialRows as any).mockResolvedValueOnce([
+      {
+        id: "go-row",
+        integrationId: "opencode-go",
+        label: "default",
+        active: false,
+        value: { type: "key", key: "go-key" },
+      },
+      {
+        id: "zen-row",
+        integrationId: "opencode",
+        label: "default",
+        active: false,
+        value: { type: "key", key: "zen-key" },
+      },
+    ]);
+    mocks.resolveOpenCodeGoAuth.mockReturnValue({ state: "configured", apiKey: "row-token" });
+
+    const out = await runFetch(["rolling", "weekly"]);
+
+    expect(mocks.queryOpenCodeGoQuota).toHaveBeenCalledOnce();
+    for (const entry of out.entries) {
+      expect(entry.accounting).toMatchObject({ sourceId: "go-row" });
+    }
+  });
+
+  it("keeps separate connections for distinct native credentials", async () => {
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    (readCredentialRows as any).mockResolvedValueOnce([
+      {
+        id: "go-row",
+        integrationId: "opencode-go",
+        label: "default",
+        active: false,
+        value: { type: "key", key: "first-key" },
+      },
+      {
+        id: "second-go-row",
+        integrationId: "opencode-go",
+        label: "default",
+        active: false,
+        value: { type: "key", key: "second-key" },
+      },
+    ]);
+    mocks.resolveOpenCodeGoAuth.mockReturnValue({ state: "configured", apiKey: "row-token" });
+
+    const out = await runFetch(["rolling", "weekly"]);
+
+    expect(mocks.queryOpenCodeGoQuota).toHaveBeenCalledTimes(2);
+    const groups = visibleEntries(out.entries, "opencode-go").map((entry) => entry.group);
+    expect(groups).toEqual(["[OpenCode Go]", "[OpenCode Go]", "[OpenCode Go]", "[OpenCode Go]"]);
+  });
+
+  it("suppresses non-entitled database connections independently", async () => {
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    const credentialRows = [
+      {
+        id: "not-subscribed",
+        integrationId: "opencode-go",
+        label: "free",
+        active: true,
+        value: { type: "key", key: "free-key" },
+      },
+      {
+        id: "subscribed",
+        integrationId: "opencode-go",
+        label: "paid",
+        active: false,
+        value: { type: "key", key: "paid-key" },
+      },
+    ];
+    (readCredentialRows as any)
+      .mockResolvedValueOnce(credentialRows)
+      .mockResolvedValueOnce(credentialRows);
+    mocks.resolveOpenCodeGoAuth.mockImplementation((auth: any) => ({
+      state: "configured",
+      apiKey: auth["opencode-go"].key,
+    }));
+    mocks.queryOpenCodeGoQuota.mockImplementation(async (apiKey: string) =>
+      apiKey === "free-key"
+        ? {
+            success: false,
+            error: "OpenCode Go not subscribed (403 EntitlementError)",
+            notSubscribed: true,
+            retryable: false,
+          }
+        : successfulResult(),
+    );
+
+    const first = await runFetch(["rolling"]);
+    const second = await runFetch(["rolling"]);
+
+    expect(mocks.queryOpenCodeGoQuota).toHaveBeenCalledTimes(3);
+    expect(mocks.queryOpenCodeGoQuota.mock.calls.map(([apiKey]) => apiKey)).toEqual([
+      "free-key",
+      "paid-key",
+      "paid-key",
+    ]);
+    expect(first.entries).toEqual([
+      expect.objectContaining({ accounting: expect.objectContaining({ sourceId: "subscribed" }) }),
+    ]);
+    expect(second.entries).toEqual([
+      expect.objectContaining({ accounting: expect.objectContaining({ sourceId: "subscribed" }) }),
+    ]);
+  });
+
+  it("falls back to legacy alias rows when no native opencode-go row exists", async () => {
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    (readCredentialRows as any).mockResolvedValueOnce([
+      {
+        id: "alias-row",
+        integrationId: "opencode",
+        label: "default",
+        active: false,
+        value: { type: "key", key: "legacy-key" },
+      },
+    ]);
+    mocks.resolveOpenCodeGoAuth.mockReturnValue({ state: "configured", apiKey: "row-token" });
+
+    const out = await runFetch(["rolling", "weekly"]);
+
+    expect(mocks.queryOpenCodeGoQuota).toHaveBeenCalledOnce();
+    expect(visibleEntries(out.entries, "opencode-go").map((entry) => entry.group)).toEqual([
+      "[OpenCode Go]",
+      "[OpenCode Go]",
+    ]);
+    for (const entry of out.entries) {
+      expect(entry.accounting).toMatchObject({ sourceId: "alias-row" });
+    }
+  });
+
+  it("passes the resolved token and effective timeout to the API client", async () => {
+    await runFetch(["rolling", "weekly", "monthly"], 12_345);
+
+    expect(mocks.queryOpenCodeGoQuota).toHaveBeenCalledWith("provider-test-token", {
+      requestTimeoutMs: 12_345,
+    });
+  });
+
+  it("returns canonical entries with remote_api accounting", async () => {
+    const out = await runFetch();
+
+    expectAttemptedWithNoErrors(out);
+    expect(visibleEntries(out.entries, "opencode-go")).toEqual([
+      {
+        name: "OpenCode Go 5h",
+        group: "OpenCode Go",
+        label: "5h:",
+        percentRemaining: 87.5,
+        resetTimeIso: "2026-08-12T12:30:00.000Z",
+      },
+      {
+        name: "OpenCode Go Weekly",
+        group: "OpenCode Go",
+        label: "Weekly:",
+        percentRemaining: 55,
+        resetTimeIso: "2026-08-16T16:00:00.000Z",
+      },
+      {
+        name: "OpenCode Go Monthly",
+        group: "OpenCode Go",
+        label: "Monthly:",
+        percentRemaining: 20,
+        resetTimeIso: "2026-09-01T04:00:00.000Z",
+      },
+    ]);
+    for (const entry of out.entries) {
+      expect(entry.accounting).toEqual({
+        resultType: "quota",
+        acquisitionMethod: "remote_api",
+        ownership: "maintained",
+        authority: "provider_reported",
+      });
+    }
+  });
+
+  it("filters duplicates in canonical order after full-response diagnostics", async () => {
+    const out = await runFetch(["monthly", "rolling", "monthly"]);
 
     expectAttemptedWithNoErrors(out);
     expect(out.entries.map((entry) => entry.name)).toEqual([
       "OpenCode Go 5h",
       "OpenCode Go Monthly",
     ]);
-  });
-
-  it("parses resetInSec-first field order", async () => {
-    mockConfigConfigured();
-    mockDashboardSuccess(buildDashboardHtmlResetFirst(10, 3600, 20, 7200, 30, 14400));
-
-    const out = await runProviderFetch();
-
-    expectAttemptedWithNoErrors(out);
-    expect(out.entries).toHaveLength(3);
-    expect(out.entries[0]).toMatchObject({ percentRemaining: 90 });
-    expect(out.entries[1]).toMatchObject({ percentRemaining: 80 });
-    expect(out.entries[2]).toMatchObject({ percentRemaining: 70 });
-  });
-
-  it("returns error on HTTP failure", async () => {
-    mockConfigConfigured();
-    mockDashboardHttpFailure(403, "Forbidden");
-
-    const out = await runProviderFetch();
-    expectAttemptedWithErrorLabel(out, "OpenCode Go");
-    expect(out.errors[0]?.message).toContain("403");
-  });
-
-  it("returns parse error when dashboard HTML does not contain any known usage windows", async () => {
-    mockConfigConfigured();
-    mockDashboardSuccess("<html><body>No usage data here</body></html>");
-
-    const out = await runProviderFetch();
-    expectAttemptedWithErrorLabel(out, "OpenCode Go");
-    expect(out.errors[0]?.message).toContain(
-      "Could not parse any known OpenCode Go dashboard usage windows",
+    expect(out.statusDetails).toEqual(
+      expect.arrayContaining([
+        { key: "selected_windows", value: "monthly,rolling,monthly" },
+        {
+          key: "rolling_usage",
+          value:
+            "status=ok percent_used=12.5 percent_remaining=87.5 reset_at=2026-08-12T12:30:00.000Z",
+        },
+        {
+          key: "weekly_usage",
+          value: "status=ok percent_used=45 percent_remaining=55 reset_at=2026-08-16T16:00:00.000Z",
+        },
+        {
+          key: "monthly_usage",
+          value: "status=ok percent_used=80 percent_remaining=20 reset_at=2026-09-01T04:00:00.000Z",
+        },
+      ]),
     );
   });
 
-  it("returns error on network failure", async () => {
-    mockConfigConfigured();
-    mocks.fetchResponse.mockRejectedValueOnce(new Error("network timeout"));
+  it("uses only the standard auth diagnostic keys", async () => {
+    const out = await runFetch(["weekly"]);
+    const keys = out.statusDetails?.map((detail) => detail.key) ?? [];
 
-    const out = await runProviderFetch();
+    expect(keys).toEqual([
+      "auth_state",
+      "auth_source",
+      "auth_checked_paths",
+      "credential_database_paths",
+      "selected_windows",
+      "rolling_usage",
+      "weekly_usage",
+      "monthly_usage",
+    ]);
+    expect(keys.some((key) => key.startsWith("config_"))).toBe(false);
+    expect(keys).not.toContain("reset_in_sec");
+  });
+
+  it("returns API failures as attempted errors with live_fetch_error", async () => {
+    mocks.queryOpenCodeGoQuota.mockResolvedValueOnce({
+      success: false,
+      error: "OpenCode Go API error 503: unavailable",
+    });
+
+    const out = await runFetch();
+
     expectAttemptedWithErrorLabel(out, "OpenCode Go");
-    expect(out.errors[0]?.message).toContain("network timeout");
+    expect(out.errors[0]?.message).toBe("OpenCode Go API error 503: unavailable");
+    expect(out.statusDetails).toContainEqual({
+      key: "live_fetch_error",
+      value: "OpenCode Go API error 503: unavailable",
+    });
   });
 
-  it("lower-bounds usagePercent at 0 and allows over-100 usage values", async () => {
-    mockConfigConfigured();
-    mockDashboardSuccess(buildDashboardHtml(150, 100, 0, 200, 50, 300));
+  it("surfaces a rate-limited monthly window as a valid result", async () => {
+    const result = successfulResult();
+    result.monthly = {
+      status: "rate-limited" as const,
+      usagePercent: 100,
+      percentRemaining: 0,
+      resetTimeIso: "2026-09-01T04:00:00.000Z",
+    };
+    mocks.queryOpenCodeGoQuota.mockResolvedValueOnce(result);
 
-    const out = await runProviderFetch();
+    const out = await runFetch();
+
     expectAttemptedWithNoErrors(out);
-    expect(out.entries[0]).toMatchObject({ percentRemaining: -50 });
-    expect(out.entries[1]).toMatchObject({ percentRemaining: 100 });
-    expect(out.entries[2]).toMatchObject({ percentRemaining: 50 });
+    expect(out.statusDetails).toContainEqual({
+      key: "monthly_usage",
+      value:
+        "status=rate-limited percent_used=100 percent_remaining=0 reset_at=2026-09-01T04:00:00.000Z",
+    });
+    expect(
+      out.entries.find((entry) => entry.name === "OpenCode Go Monthly")?.percentRemaining,
+    ).toBe(0);
   });
 
-  it("sanitizes error text from dashboard responses", async () => {
-    mockConfigConfigured();
-    mockDashboardHttpFailure(500, "\u001b[31mInternal Error\nretry\u001b[0m");
+  it("keeps healthy sibling rows when one window is exhausted", async () => {
+    const result = successfulResult();
+    result.weekly = {
+      status: "rate-limited" as const,
+      usagePercent: 100,
+      percentRemaining: 0,
+      resetTimeIso: "2026-08-16T16:00:00.000Z",
+    };
+    mocks.queryOpenCodeGoQuota.mockResolvedValueOnce(result);
 
-    const out = await runProviderFetch();
-    expectAttemptedWithErrorLabel(out, "OpenCode Go");
-    expect(out.errors[0]?.message).toBe("OpenCode Go dashboard error 500: Internal Error retry");
-  });
+    const out = await runFetch();
 
-  it("parses data-slot HTML format when SolidJS SSR is not present", async () => {
-    mockConfigConfigured();
-    mockDashboardSuccess(
-      buildDataSlotOnlyHtml({
-        rolling: [1, "1 hour 56 minutes"],
-        weekly: [1, "6 days 2 hours"],
-        monthly: [0, "26 days 17 hours"],
-      }),
+    expectAttemptedWithNoErrors(out);
+    expect(visibleEntries(out.entries, "opencode-go")).toEqual([
+      {
+        name: "OpenCode Go 5h",
+        group: "OpenCode Go",
+        label: "5h:",
+        percentRemaining: 87.5,
+        resetTimeIso: "2026-08-12T12:30:00.000Z",
+      },
+      {
+        name: "OpenCode Go Weekly",
+        group: "OpenCode Go",
+        label: "Weekly:",
+        percentRemaining: 0,
+        resetTimeIso: "2026-08-16T16:00:00.000Z",
+      },
+      {
+        name: "OpenCode Go Monthly",
+        group: "OpenCode Go",
+        label: "Monthly:",
+        percentRemaining: 20,
+        resetTimeIso: "2026-09-01T04:00:00.000Z",
+      },
+    ]);
+    expect(out.statusDetails).toEqual(
+      expect.arrayContaining([
+        {
+          key: "rolling_usage",
+          value:
+            "status=ok percent_used=12.5 percent_remaining=87.5 reset_at=2026-08-12T12:30:00.000Z",
+        },
+        {
+          key: "weekly_usage",
+          value:
+            "status=rate-limited percent_used=100 percent_remaining=0 reset_at=2026-08-16T16:00:00.000Z",
+        },
+        {
+          key: "monthly_usage",
+          value: "status=ok percent_used=80 percent_remaining=20 reset_at=2026-09-01T04:00:00.000Z",
+        },
+      ]),
     );
-
-    const out = await runProviderFetch();
-
-    expectAttemptedWithNoErrors(out);
-    expect(out.entries).toHaveLength(3);
-    expect(out.entries[0]).toMatchObject({
-      name: "OpenCode Go 5h",
-      group: "OpenCode Go",
-      label: "5h:",
-      percentRemaining: 99,
-    });
-    expect(out.entries[1]).toMatchObject({
-      name: "OpenCode Go Weekly",
-      group: "OpenCode Go",
-      label: "Weekly:",
-      percentRemaining: 99,
-    });
-    expect(out.entries[2]).toMatchObject({
-      name: "OpenCode Go Monthly",
-      group: "OpenCode Go",
-      label: "Monthly:",
-      percentRemaining: 100,
-    });
   });
 
-  it("parses data-slot reset-now as a valid zero-second reset", async () => {
-    mockConfigConfigured();
-    mockDashboardSuccess(`<div data-slot="usage">
-      <div data-slot="usage-item">
-        <span data-slot="usage-label">Rolling Usage</span>
-        <span data-slot="usage-value"><!--$-->12<!--/-->%</span>
-        <span data-slot="reset-now"><!--$-->reset-now<!--/--></span>
-      </div>
-    </div>`);
+  it("omits an unselected exhausted window from entries while keeping live diagnostics", async () => {
+    const result = successfulResult();
+    result.weekly = {
+      status: "rate-limited" as const,
+      usagePercent: 100,
+      percentRemaining: 0,
+      resetTimeIso: "2026-08-16T16:00:00.000Z",
+    };
+    mocks.queryOpenCodeGoQuota.mockResolvedValueOnce(result);
 
-    const out = await runProviderFetch();
-
-    expectAttemptedWithNoErrors(out);
-    expect(out.entries).toHaveLength(1);
-    expect(out.entries[0]).toMatchObject({
-      name: "OpenCode Go 5h",
-      percentRemaining: 88,
-    });
-    expect(out.entries[0]).toHaveProperty("resetTimeIso");
-  });
-
-  it("prefers SolidJS SSR format when both formats are present", async () => {
-    mockConfigConfigured();
-    // HTML with both SolidJS SSR and data-slot formats
-    const mixedHtml = `<html><script>rollingUsage:$R[10]={usagePercent:7,resetInSec:18000}weeklyUsage:$R[11]={usagePercent:2,resetInSec:540000}monthlyUsage:$R[12]={usagePercent:16,resetInSec:2480000}</script>
-    <div data-slot="usage">
-      <div data-slot="usage-item">
-        <span data-slot="usage-label">Rolling Usage</span>
-        <span data-slot="usage-value"><!--$-->99<!--/-->%</span>
-        <span data-slot="reset-time"><!--$-->Resets in<!--/--> <!--$-->1 hour<!--/--></span>
-      </div>
-    </div></html>`;
-    mockDashboardSuccess(mixedHtml);
-
-    const out = await runProviderFetch();
+    const out = await runFetch(["rolling", "monthly"]);
 
     expectAttemptedWithNoErrors(out);
-    // Should use SolidJS SSR values (7%, 2%, 16%) not data-slot values (99%)
-    expect(out.entries[0]).toMatchObject({ percentRemaining: 93 });
-    expect(out.entries[1]).toMatchObject({ percentRemaining: 98 });
-    expect(out.entries[2]).toMatchObject({ percentRemaining: 84 });
-  });
-
-  it("parses data-slot format with partial windows", async () => {
-    mockConfigConfigured();
-    mockDashboardSuccess(
-      buildDataSlotOnlyHtml({
-        rolling: [5, "2 hours"],
-        monthly: [50, "30 days"],
-      }),
+    expect(out.entries.map((entry) => entry.name)).toEqual([
+      "OpenCode Go 5h",
+      "OpenCode Go Monthly",
+    ]);
+    expect(out.entries.some((entry) => entry.name === "OpenCode Go Weekly")).toBe(false);
+    expect(out.statusDetails).toEqual(
+      expect.arrayContaining([
+        { key: "selected_windows", value: "rolling,monthly" },
+        {
+          key: "weekly_usage",
+          value:
+            "status=rate-limited percent_used=100 percent_remaining=0 reset_at=2026-08-16T16:00:00.000Z",
+        },
+      ]),
     );
-
-    const out = await runProviderFetch();
-
-    expectAttemptedWithNoErrors(out);
-    expect(out.entries).toHaveLength(2);
-    expect(out.entries[0]).toMatchObject({ name: "OpenCode Go 5h", percentRemaining: 95 });
-    expect(out.entries[1]).toMatchObject({ name: "OpenCode Go Monthly", percentRemaining: 50 });
   });
 
-  it("returns error when neither SolidJS SSR nor data-slot format is found", async () => {
-    mockConfigConfigured();
-    mockDashboardSuccess("<html><body><div>No usage data at all</div></body></html>");
+  it("suppresses repeat requests after a not-subscribed response", async () => {
+    mocks.queryOpenCodeGoQuota.mockResolvedValue({
+      success: false,
+      error: "OpenCode Go not subscribed (403 EntitlementError)",
+      notSubscribed: true,
+      retryable: false,
+    });
 
-    const out = await runProviderFetch();
-    expectAttemptedWithErrorLabel(out, "OpenCode Go");
-    expect(out.errors[0]?.message).toContain(
-      "Could not parse any known OpenCode Go dashboard usage windows",
+    const first = await runFetch();
+    const second = await runFetch();
+
+    expectAttemptedWithNoErrors(first);
+    expectAttemptedWithNoErrors(second);
+    expect(first.entries).toEqual([]);
+    expect(second.entries).toEqual([]);
+    expect(first.statusDetails).toContainEqual({
+      key: "opencode_go_state",
+      value: "not_subscribed",
+    });
+    expect(second.statusDetails).toContainEqual({
+      key: "opencode_go_state",
+      value: "not_subscribed",
+    });
+    expect(mocks.queryOpenCodeGoQuota).toHaveBeenCalledTimes(1);
+  });
+
+  it("queries again after the credential changes, including when the original returns", async () => {
+    mocks.queryOpenCodeGoQuota.mockResolvedValueOnce({
+      success: false,
+      error: "OpenCode Go not subscribed (403 EntitlementError)",
+      notSubscribed: true,
+      retryable: false,
+    });
+    await expect(opencodeGoProvider.isAvailable(createProviderAvailabilityContext())).resolves.toBe(
+      true,
     );
+    await runFetch();
+
+    mocks.resolveOpenCodeGoAuthCached.mockResolvedValue({
+      state: "configured",
+      apiKey: "new-provider-test-token",
+    });
+    await runFetch();
+
+    mocks.resolveOpenCodeGoAuthCached.mockResolvedValue({
+      state: "configured",
+      apiKey: "provider-test-token",
+    });
+    await runFetch();
+
+    expect(mocks.queryOpenCodeGoQuota).toHaveBeenCalledTimes(3);
+    expect(mocks.queryOpenCodeGoQuota).toHaveBeenNthCalledWith(2, "new-provider-test-token", {
+      requestTimeoutMs: 5_000,
+    });
+    expect(mocks.queryOpenCodeGoQuota).toHaveBeenLastCalledWith("provider-test-token", {
+      requestTimeoutMs: 5_000,
+    });
+  });
+
+  it.each([
+    ["missing", { state: "none" }],
+    ["invalid", { state: "invalid", error: "OpenCode Go auth entry present but key is empty" }],
+  ])("queries again after production availability sees %s auth", async (_name, auth) => {
+    mocks.queryOpenCodeGoQuota.mockResolvedValueOnce({
+      success: false,
+      error: "OpenCode Go not subscribed (403 EntitlementError)",
+      notSubscribed: true,
+      retryable: false,
+    });
+    await runFetch();
+
+    mocks.resolveOpenCodeGoAuthCached.mockResolvedValueOnce(auth);
+    await expect(opencodeGoProvider.isAvailable(createProviderAvailabilityContext())).resolves.toBe(
+      false,
+    );
+    await runFetch();
+
+    expect(mocks.queryOpenCodeGoQuota).toHaveBeenCalledTimes(2);
+    expect(mocks.queryOpenCodeGoQuota).toHaveBeenLastCalledWith("provider-test-token", {
+      requestTimeoutMs: 5_000,
+    });
+  });
+
+  it("does not copy the resolved token into provider output", async () => {
+    const out = await runFetch();
+    expect(JSON.stringify(out)).not.toContain("provider-test-token");
   });
 });
 
-describe("opencode-go matchesCurrentModel", () => {
+describe("opencode-go availability and model matching", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    __resetOpenCodeGoNotSubscribedForTests();
+  });
+
+  it.each([
+    [{ state: "configured", apiKey: "key" }, true],
+    [{ state: "invalid", error: "bad auth" }, false],
+    [{ state: "none" }, false],
+  ])("maps auth state %j to availability %s without a request", async (auth, expected) => {
+    mocks.resolveOpenCodeGoAuthCached.mockResolvedValueOnce(auth);
+
+    await expect(opencodeGoProvider.isAvailable(createProviderAvailabilityContext())).resolves.toBe(
+      expected,
+    );
+    expect(mocks.queryOpenCodeGoQuota).not.toHaveBeenCalled();
+  });
+
+  it("stays available for a failed Console sign-in without an API key", async () => {
+    mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce({
+      state: "invalid",
+      error: "refresh_failed: HTTP 401",
+    });
+    mocks.resolveOpenCodeGoAuthCached.mockResolvedValueOnce({ state: "none" });
+
+    await expect(opencodeGoProvider.isAvailable(createProviderAvailabilityContext())).resolves.toBe(
+      true,
+    );
+  });
+
   it.each([
     ["opencode-go/some-model", true],
     ["opencode-go-subscription/any", true],
@@ -573,172 +979,5 @@ describe("opencode-go matchesCurrentModel", () => {
     ["copilot/gpt-4", false],
   ])("matchesCurrentModel(%s) -> %s", (model, expected) => {
     expect(opencodeGoProvider.matchesCurrentModel?.(model)).toBe(expected);
-  });
-});
-
-describe("opencode-go isAvailable", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it.each([
-    [{ state: "configured", config: { workspaceId: "ws", authCookie: "ck" }, source: "env" }, true],
-    [{ state: "incomplete", source: "env", missing: "authCookie" }, false],
-    [{ state: "invalid", source: "/tmp/opencode-go.json", error: "broken" }, false],
-    [{ state: "none" }, false],
-  ])("returns correct availability for config state %j", async (configState, expected) => {
-    mocks.resolveOpenCodeGoConfigCached.mockResolvedValueOnce(configState);
-    const available = await opencodeGoProvider.isAvailable({} as any);
-    expect(available).toBe(expected);
-  });
-});
-
-describe("_parseWindowUsage", () => {
-  const rollingRePctFirst =
-    /rollingUsage:\$R\[\d+\]=\{[^}]*usagePercent:(\d+)[^}]*resetInSec:(\d+)[^}]*\}/;
-  const rollingReResetFirst =
-    /rollingUsage:\$R\[\d+\]=\{[^}]*resetInSec:(\d+)[^}]*usagePercent:(\d+)[^}]*\}/;
-
-  it("returns null for empty string", () => {
-    expect(_parseWindowUsage("", rollingRePctFirst, rollingReResetFirst)).toBeNull();
-  });
-
-  it("parses usagePercent-first ordering", () => {
-    const html = "rollingUsage:$R[42]={usagePercent:55,resetInSec:3600}";
-    expect(_parseWindowUsage(html, rollingRePctFirst, rollingReResetFirst)).toEqual({
-      usagePercent: 55,
-      resetInSec: 3600,
-    });
-  });
-
-  it("parses resetInSec-first ordering", () => {
-    const html = "rollingUsage:$R[7]={resetInSec:7200,usagePercent:30}";
-    expect(_parseWindowUsage(html, rollingRePctFirst, rollingReResetFirst)).toEqual({
-      usagePercent: 30,
-      resetInSec: 7200,
-    });
-  });
-
-  it("returns null when pattern is missing", () => {
-    expect(
-      _parseWindowUsage("<html><body>hello</body></html>", rollingRePctFirst, rollingReResetFirst),
-    ).toBeNull();
-  });
-
-  it("handles extra fields in the object", () => {
-    const html = "rollingUsage:$R[1]={usagePercent:10,foo:bar,resetInSec:500}";
-    expect(_parseWindowUsage(html, rollingRePctFirst, rollingReResetFirst)).toEqual({
-      usagePercent: 10,
-      resetInSec: 500,
-    });
-  });
-});
-
-describe("_parseDataSlotFormat", () => {
-  it("returns empty object for HTML without data-slot usage items", () => {
-    expect(_parseDataSlotFormat("<html><body>no usage</body></html>")).toEqual({});
-  });
-
-  it("parses all three windows from data-slot HTML", () => {
-    const html = buildDataSlotOnlyHtml({
-      rolling: [1, "1 hour 56 minutes"],
-      weekly: [10, "6 days 2 hours"],
-      monthly: [50, "26 days 17 hours"],
-    });
-
-    const result = _parseDataSlotFormat(html);
-
-    expect(result.rolling).toEqual({ usagePercent: 1, resetInSec: 6960 }); // 1h 56m = 6960s
-    expect(result.weekly).toEqual({ usagePercent: 10, resetInSec: 525600 }); // 6d 2h = 525600s
-    expect(result.monthly).toEqual({ usagePercent: 50, resetInSec: 2307600 }); // 26d 17h = 2307600s
-  });
-
-  it("parses partial windows", () => {
-    const html = buildDataSlotOnlyHtml({
-      rolling: [5, "2 hours"],
-      monthly: [80, "30 days"],
-    });
-
-    const result = _parseDataSlotFormat(html);
-
-    expect(result.rolling).toEqual({ usagePercent: 5, resetInSec: 7200 });
-    expect(result.weekly).toBeUndefined();
-    expect(result.monthly).toEqual({ usagePercent: 80, resetInSec: 2592000 });
-  });
-
-  it("handles decimal usage percentages", () => {
-    const html = buildDataSlotOnlyHtml({
-      monthly: [66.5, "26 days"],
-    });
-
-    const result = _parseDataSlotFormat(html);
-
-    expect(result.monthly).toEqual({ usagePercent: 66.5, resetInSec: 2246400 });
-  });
-
-  it("parses reset-now slots as zero seconds", () => {
-    const html = `<div data-slot="usage">
-      <div data-slot="usage-item">
-        <span data-slot="usage-label">Rolling Usage</span>
-        <span data-slot="usage-value"><!--$-->5<!--/-->%</span>
-        <span data-slot="reset-now"><!--$-->reset-now<!--/--></span>
-      </div>
-    </div>`;
-
-    expect(_parseDataSlotFormat(html).rolling).toEqual({ usagePercent: 5, resetInSec: 0 });
-  });
-
-  it("parses reset-time reset-now text as zero seconds", () => {
-    const html = `<div data-slot="usage">
-      <div data-slot="usage-item">
-        <span data-slot="usage-label">Weekly Usage</span>
-        <span data-slot="usage-value"><!--$-->10<!--/-->%</span>
-        <span data-slot="reset-time"><!--$-->reset-now<!--/--></span>
-      </div>
-    </div>`;
-
-    expect(_parseDataSlotFormat(html).weekly).toEqual({ usagePercent: 10, resetInSec: 0 });
-  });
-
-  it("handles various time formats", () => {
-    const html = `<div data-slot="usage">
-      <div data-slot="usage-item">
-        <span data-slot="usage-label">Monthly Usage</span>
-        <span data-slot="usage-value"><!--$-->10<!--/-->%</span>
-        <span data-slot="reset-time"><!--$-->Resets in<!--/--> <!--$-->5 minutes<!--/--></span>
-      </div>
-    </div>`;
-
-    const result = _parseDataSlotFormat(html);
-
-    expect(result.monthly).toEqual({ usagePercent: 10, resetInSec: 300 });
-  });
-
-  it("handles time with only days", () => {
-    const html = `<div data-slot="usage">
-      <div data-slot="usage-item">
-        <span data-slot="usage-label">Monthly Usage</span>
-        <span data-slot="usage-value"><!--$-->20<!--/-->%</span>
-        <span data-slot="reset-time"><!--$-->Resets in<!--/--> <!--$-->15 days<!--/--></span>
-      </div>
-    </div>`;
-
-    const result = _parseDataSlotFormat(html);
-
-    expect(result.monthly).toEqual({ usagePercent: 20, resetInSec: 1296000 });
-  });
-
-  it("handles time with only hours", () => {
-    const html = `<div data-slot="usage">
-      <div data-slot="usage-item">
-        <span data-slot="usage-label">Rolling Usage</span>
-        <span data-slot="usage-value"><!--$-->5<!--/-->%</span>
-        <span data-slot="reset-time"><!--$-->Resets in<!--/--> <!--$-->3 hours<!--/--></span>
-      </div>
-    </div>`;
-
-    const result = _parseDataSlotFormat(html);
-
-    expect(result.rolling).toEqual({ usagePercent: 5, resetInSec: 10800 });
   });
 });

@@ -117,6 +117,7 @@ export function createQuotaProviderRuntimeContext(runtime: {
   config: QuotaToastConfig;
   session: QuotaRuntimeContext["session"];
   resolveRuntimeProviderIds: RuntimeProviderIdResolver;
+  workspaceRoot: string;
   configMeta?: Pick<LoadConfigMeta, "settingSources">;
   configureTelemetry?: boolean;
 }): QuotaProviderContext {
@@ -126,8 +127,8 @@ export function createQuotaProviderRuntimeContext(runtime: {
   return {
     client: runtime.client,
     resolveRuntimeProviderIds: runtime.resolveRuntimeProviderIds,
+    workspaceRoot: runtime.workspaceRoot,
     config: {
-      googleModels: runtime.config.googleModels,
       anthropicBinaryPath: runtime.config.anthropicBinaryPath,
       cursorPlan: runtime.config.cursorPlan,
       cursorIncludedApiUsd: runtime.config.cursorIncludedApiUsd,
@@ -164,7 +165,6 @@ function configureRuntimeTelemetry(runtime: {
           ? "auto"
           : [...runtime.config.enabledProviders].sort(),
         runtime.config.quotaProviders,
-        runtime.config.googleModels,
         runtime.config.anthropicBinaryPath,
         runtime.config.cursorPlan,
         runtime.config.cursorIncludedApiUsd,

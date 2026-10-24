@@ -18,6 +18,15 @@ vi.mock("../src/providers/registry.js", () => ({
   getProviders: () => mockProviders,
 }));
 
+const consoleAuthMocks = vi.hoisted(() => ({
+  resolveOpenCodeConsoleAuth: vi.fn(),
+}));
+
+vi.mock("../src/lib/opencode-console-auth.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/lib/opencode-console-auth.js")>()),
+  resolveOpenCodeConsoleAuth: consoleAuthMocks.resolveOpenCodeConsoleAuth,
+}));
+
 vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
   getOpencodeRuntimeDirs: () => ({
     dataDir: `${TEST_RUNTIME_ROOT}/data`,
@@ -34,6 +43,7 @@ import {
 } from "../src/lib/quota-render-data.js";
 import { __resetQuotaStateForTests } from "../src/lib/quota-state.js";
 import { DEFAULT_CONFIG, type QuotaToastConfig } from "../src/lib/types.js";
+import { opencodeZenProvider } from "../src/providers/opencode-zen.js";
 
 function renderConfig(overrides: Partial<QuotaToastConfig> = {}): QuotaToastConfig {
   return { ...DEFAULT_CONFIG, showSessionTokens: false, ...overrides };
@@ -46,6 +56,7 @@ function testProvider(
 ) {
   return {
     id,
+    cachePolicy: { kind: "account-neutral" as const },
     isAvailable:
       availability instanceof Error
         ? vi.fn().mockRejectedValue(availability)
@@ -109,6 +120,56 @@ describe("collectQuotaRenderData shared quota state", () => {
         percentRemaining: 42,
       },
     ]);
+  });
+
+  it("surfaces a failed OpenCode Zen sign-in but keeps auto mode quiet without one", async () => {
+    // A failed Console sign-in passes the auto-mode availability gate so
+    // fetch() can show its recovery hint.
+    consoleAuthMocks.resolveOpenCodeConsoleAuth.mockResolvedValue({
+      state: "invalid",
+      error: "refresh_failed: boom",
+    });
+
+    const failed = await collectQuotaRenderData({
+      client: TEST_CLIENT,
+      config: renderConfig(),
+      surfaceExplicitProviderIssues: true,
+      formatStyle: "allWindows",
+      providers: [opencodeZenProvider],
+    });
+    expect(failed.active).toEqual([opencodeZenProvider]);
+    expect(failed.data?.errors).toContainEqual({
+      label: "OpenCode Zen",
+      message:
+        "OpenCode Console sign-in failed: refresh_failed: boom. Run `opencode auth login opencode`.",
+    });
+
+    // Without a Console sign-in, auto mode stays silent, but an explicit
+    // opencode entry keeps Zen actionable.
+    consoleAuthMocks.resolveOpenCodeConsoleAuth.mockResolvedValue({ state: "none" });
+
+    const autoNone = await collectQuotaRenderData({
+      client: TEST_CLIENT,
+      config: renderConfig(),
+      surfaceExplicitProviderIssues: true,
+      formatStyle: "allWindows",
+      providers: [opencodeZenProvider],
+    });
+    expect(autoNone.active).toEqual([]);
+    expect(autoNone.data?.errors ?? []).toEqual([]);
+
+    const explicitNone = await collectQuotaRenderData({
+      client: TEST_CLIENT,
+      config: renderConfig({ enabledProviders: ["opencode"] }),
+      surfaceExplicitProviderIssues: true,
+      formatStyle: "allWindows",
+      providers: [opencodeZenProvider],
+    });
+    expect(explicitNone.active).toEqual([opencodeZenProvider]);
+    expect(explicitNone.data?.errors).toContainEqual({
+      label: "OpenCode Zen",
+      message: "No OpenCode Console sign-in found. Run `opencode auth login opencode`.",
+    });
   });
 
   it("returns allWindowsData when includeAllWindowsData is true and style is singleWindow", async () => {
@@ -318,6 +379,48 @@ describe("collectQuotaRenderData shared quota state", () => {
     ]);
   });
 
+  it("marks providers excluded by current-model filtering as intentional diagnostics", async () => {
+    const openaiProvider = testProvider("openai", {
+      entries: [{ accounting: TEST_ACCOUNTING, name: "OpenAI", percentRemaining: 75 }],
+    });
+    const xaiProvider = testProvider("xai");
+    const ollamaProvider = testProvider("ollama-cloud");
+    const openrouterProvider = testProvider("openrouter");
+
+    const result = await collectQuotaRenderData({
+      client: TEST_CLIENT,
+      config: renderConfig({
+        enabledProviders: ["openai", "xai", "ollama-cloud", "openrouter"],
+        onlyCurrentModel: true,
+      }),
+      request: {
+        sessionID: "explicit-openai-session",
+        sessionMeta: { providerID: "openai", modelID: "gpt-5.6-sol" },
+      },
+      surfaceExplicitProviderIssues: true,
+      formatStyle: "allWindows",
+      providers: [openaiProvider, xaiProvider, ollamaProvider, openrouterProvider],
+    });
+
+    expect(result.data?.errors).toEqual([
+      {
+        kind: "intentional-filter",
+        label: "xAI",
+        message: "Skipped (current model: gpt-5.6-sol)",
+      },
+      {
+        kind: "intentional-filter",
+        label: "Ollama Cloud",
+        message: "Skipped (current model: gpt-5.6-sol)",
+      },
+      {
+        kind: "intentional-filter",
+        label: "OpenRouter",
+        message: "Skipped (current model: gpt-5.6-sol)",
+      },
+    ]);
+  });
+
   it("normalizes provider-only session metadata before matching providers", () => {
     expect(
       matchesQuotaProviderCurrentSelection({
@@ -327,23 +430,96 @@ describe("collectQuotaRenderData shared quota state", () => {
     ).toBe(true);
   });
 
-  it("uses currentModel matching when currentProviderID is also present", () => {
-    const provider = {
-      id: "openai",
+  it("selects an explicit OpenAI provider for an unprefixed OpenAI model", () => {
+    const openaiProvider = {
+      ...testProvider("openai"),
       matchesCurrentModel: vi.fn().mockReturnValue(false),
     };
 
     expect(
       matchesQuotaProviderCurrentSelection({
-        provider: provider as any,
+        provider: openaiProvider,
         currentProviderID: "openai",
-        currentModel: "anthropic/claude-sonnet-4",
+        currentModel: "gpt-5.6-sol",
+      }),
+    ).toBe(true);
+    expect(openaiProvider.matchesCurrentModel).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["chatgpt", "openai"],
+    ["codex", "openai"],
+    ["chutes-ai", "chutes"],
+  ])("selects the catalog provider for runtime alias %s", (currentProviderID, providerId) => {
+    const provider = {
+      ...testProvider(providerId),
+      matchesCurrentModel: vi.fn().mockReturnValue(false),
+    };
+
+    expect(
+      matchesQuotaProviderCurrentSelection({
+        provider,
+        currentProviderID,
+        currentModel: "unprefixed-model-id",
+      }),
+    ).toBe(true);
+    expect(provider.matchesCurrentModel).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["claude", "anthropic"],
+    ["open-cursor", "cursor"],
+    ["alibaba", "alibaba-coding-plan"],
+  ])("fails closed for normalization-only provider synonym %s", (currentProviderID, providerId) => {
+    expect(
+      matchesQuotaProviderCurrentSelection({
+        provider: testProvider(providerId),
+        currentProviderID,
+        currentModel: "unprefixed-model-id",
       }),
     ).toBe(false);
-    expect(provider.matchesCurrentModel).toHaveBeenCalledWith("anthropic/claude-sonnet-4", {
-      enabledProviders: "auto",
-      currentProviderID: "openai",
-    });
+  });
+
+  it("resolves the google runtime ID to Gemini CLI", () => {
+    expect(
+      matchesQuotaProviderCurrentSelection({
+        provider: testProvider("google-gemini-cli"),
+        currentProviderID: "google",
+        currentModel: "gemini-2.5-pro",
+      }),
+    ).toBe(true);
+  });
+
+  it("fails closed for an unknown explicit provider ID instead of broad model matching", () => {
+    const openaiProvider = {
+      ...testProvider("openai"),
+      matchesCurrentModel: vi.fn().mockReturnValue(true),
+    };
+
+    expect(
+      matchesQuotaProviderCurrentSelection({
+        provider: openaiProvider,
+        currentProviderID: "private-openai-compatible-gateway",
+        currentModel: "openai/gpt-5.6-sol",
+      }),
+    ).toBe(false);
+    expect(openaiProvider.matchesCurrentModel).not.toHaveBeenCalled();
+  });
+
+  it("does not select OpenAI for an explicit OpenRouter provider with an OpenAI-looking model", () => {
+    const openaiProvider = {
+      ...testProvider("openai"),
+      matchesCurrentModel: vi.fn().mockReturnValue(true),
+    };
+
+    expect(
+      matchesQuotaProviderCurrentSelection({
+        provider: openaiProvider,
+        currentProviderID: "openrouter",
+        currentModel: "openai/gpt-5.6-sol",
+      }),
+    ).toBe(false);
+    expect(openaiProvider.matchesCurrentModel).not.toHaveBeenCalled();
   });
 
   it("passes explicit enabledProviders context into current-model matching", () => {
@@ -364,7 +540,7 @@ describe("collectQuotaRenderData shared quota state", () => {
     });
   });
 
-  it("selects quota providers by exact model and permits provider-only identity only for provider-wide sources", () => {
+  it("keeps model-level matching for quota providers that share a provider ID", () => {
     const quotaProviders = [
       {
         id: "wide",
@@ -381,7 +557,7 @@ describe("collectQuotaRenderData shared quota state", () => {
         mode: "remote-api",
         url: "https://model.example/accounting",
         format: "quota-v1" as const,
-        modelIds: ["company/model-a"],
+        modelIds: ["model-a"],
       },
     ];
     const provider = {
@@ -402,11 +578,16 @@ describe("collectQuotaRenderData shared quota state", () => {
     expect(
       matchesQuotaProviderCurrentSelection({
         provider: provider as any,
-        currentModel: "company/model-a",
+        currentModel: "model-a",
         currentProviderID: "company",
         quotaProviders,
       }),
     ).toBe(true);
+    expect(provider.matchesCurrentModel).toHaveBeenCalledWith("model-a", {
+      enabledProviders: "auto",
+      currentProviderID: "company",
+      quotaProviders,
+    });
     expect(
       matchesQuotaProviderCurrentSelection({
         provider: provider as any,
@@ -510,15 +691,351 @@ describe("collectQuotaRenderData shared quota state", () => {
     expect(syntheticProvider.fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("suppresses a redundant Antigravity family only in render projections", async () => {
+  it("reprojects one immutable cached semantic snapshot across detail changes and refreshes normally at TTL zero", async () => {
+    const provider = testProvider("synthetic", {
+      entries: [
+        {
+          accounting: { ...TEST_ACCOUNTING, sourceId: "account-a" },
+          name: "Monthly quota",
+          group: "Semantic",
+          percentRemaining: 75,
+          semantic: {
+            metric: { kind: "window", window: "month" },
+            prominence: "primary",
+          },
+          basis: {
+            remaining: {
+              quantity: { decimal: "75", unit: { kind: "count", unit: "credit" } },
+              authority: "provider_reported",
+            },
+          },
+        },
+        {
+          accounting: {
+            ...TEST_ACCOUNTING,
+            resultType: "balance",
+            sourceId: "account-a",
+          },
+          kind: "quantity",
+          name: "Balance",
+          group: "Semantic",
+          quantity: { decimal: "12.5", unit: { kind: "currency", code: "USD" } },
+          semantic: {
+            metric: { kind: "component", component: "total_balance" },
+            prominence: "supplementary",
+          },
+        },
+        {
+          accounting: TEST_ACCOUNTING,
+          kind: "value",
+          name: "Legacy status",
+          value: "Ready",
+        },
+      ],
+    });
+
+    const baseConfig = {
+      enabledProviders: ["synthetic"],
+      minIntervalMs: 60_000,
+    } as const;
+    const summary = await collectQuotaRenderData({
+      client: TEST_CLIENT,
+      config: renderConfig({ ...baseConfig, accountingDetail: "summary" }),
+      surfaceExplicitProviderIssues: true,
+      formatStyle: "allWindows",
+      providers: [provider],
+    });
+    expect(summary.data?.entries.map((entry) => entry.name)).toEqual([
+      "Monthly quota",
+      "Legacy status",
+    ]);
+
+    const projectedPercent = summary.data?.entries[0];
+    if (
+      !projectedPercent ||
+      !("percentRemaining" in projectedPercent) ||
+      !projectedPercent.semantic ||
+      !projectedPercent.basis?.remaining
+    ) {
+      throw new Error("expected projected semantic percentage with remaining basis");
+    }
+    projectedPercent.semantic.metric = { kind: "aggregate" };
+    projectedPercent.basis.remaining.quantity.decimal = "1";
+
+    const detailed = await collectQuotaRenderData({
+      client: TEST_CLIENT,
+      config: renderConfig({ ...baseConfig, accountingDetail: "detailed" }),
+      surfaceExplicitProviderIssues: true,
+      formatStyle: "allWindows",
+      providers: [provider],
+    });
+    expect(detailed.data?.entries.map((entry) => entry.name)).toEqual([
+      "Monthly quota",
+      "Balance",
+      "Legacy status",
+    ]);
+    const detailedPercent = detailed.data?.entries[0];
+    if (!detailedPercent || !("percentRemaining" in detailedPercent)) {
+      throw new Error("expected detailed semantic percentage");
+    }
+    expect(detailedPercent.semantic?.metric).toEqual({ kind: "window", window: "month" });
+    expect(detailedPercent.basis?.remaining?.quantity.decimal).toBe("75");
+    expect(provider.fetch).toHaveBeenCalledTimes(1);
+
+    await collectQuotaRenderData({
+      client: TEST_CLIENT,
+      config: renderConfig({
+        ...baseConfig,
+        accountingDetail: "detailed",
+        minIntervalMs: 0,
+      }),
+      surfaceExplicitProviderIssues: true,
+      formatStyle: "allWindows",
+      providers: [provider],
+    });
+    expect(provider.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("partitions semantic single-window percentages by source and result while retaining non-window facts", async () => {
+    const provider = testProvider("synthetic", {
+      entries: [
+        {
+          accounting: { ...TEST_ACCOUNTING, sourceId: "account-a" },
+          name: "A weekly quota",
+          group: "Semantic",
+          percentRemaining: 30,
+          semantic: { metric: { kind: "window", window: "week" }, prominence: "primary" },
+        },
+        {
+          accounting: { ...TEST_ACCOUNTING, sourceId: "account-a" },
+          name: "A daily quota",
+          group: "Semantic",
+          percentRemaining: 30,
+          semantic: { metric: { kind: "window", window: "day" }, prominence: "primary" },
+        },
+        {
+          accounting: { ...TEST_ACCOUNTING, resultType: "budget", sourceId: "account-a" },
+          name: "A monthly budget",
+          group: "Semantic",
+          percentRemaining: 40,
+          semantic: { metric: { kind: "window", window: "month" }, prominence: "primary" },
+        },
+        {
+          accounting: { ...TEST_ACCOUNTING, resultType: "budget", sourceId: "account-a" },
+          name: "A yearly budget",
+          group: "Semantic",
+          percentRemaining: 20,
+          semantic: { metric: { kind: "window", window: "year" }, prominence: "primary" },
+        },
+        {
+          accounting: { ...TEST_ACCOUNTING, sourceId: "account-b" },
+          name: "B daily quota",
+          group: "Semantic",
+          percentRemaining: 15,
+          semantic: { metric: { kind: "window", window: "day" }, prominence: "primary" },
+        },
+        {
+          accounting: { ...TEST_ACCOUNTING, resultType: "spend", sourceId: "account-a" },
+          name: "Known spend",
+          group: "Semantic",
+          percentRemaining: 90,
+          semantic: { metric: { kind: "named", name: "Known API" }, prominence: "primary" },
+        },
+        {
+          accounting: { ...TEST_ACCOUNTING, resultType: "balance", sourceId: "account-a" },
+          kind: "quantity",
+          name: "USD balance",
+          group: "Semantic",
+          quantity: { decimal: "10", unit: { kind: "currency", code: "USD" } },
+          semantic: {
+            metric: { kind: "component", component: "total_balance" },
+            prominence: "primary",
+          },
+        },
+        {
+          accounting: { ...TEST_ACCOUNTING, resultType: "balance", sourceId: "account-a" },
+          kind: "quantity",
+          name: "CNY balance",
+          group: "Semantic",
+          quantity: { decimal: "20", unit: { kind: "currency", code: "CNY" } },
+          semantic: {
+            metric: { kind: "component", component: "total_balance" },
+            prominence: "primary",
+          },
+        },
+      ],
+    });
+
+    const result = await collectQuotaRenderData({
+      client: TEST_CLIENT,
+      config: renderConfig({
+        enabledProviders: ["synthetic"],
+        accountingDetail: "detailed",
+      }),
+      surfaceExplicitProviderIssues: true,
+      formatStyle: "singleWindow",
+      providers: [provider],
+    });
+
+    const entries = result.data?.entries ?? [];
+    expect(entries).toHaveLength(6);
+    expect(
+      entries.map((entry) => ({
+        resultType: entry.accounting.resultType,
+        sourceId: entry.accounting.sourceId,
+        metric: entry.semantic?.metric,
+        unit: entry.kind === "quantity" ? entry.quantity.unit : undefined,
+      })),
+    ).toEqual([
+      {
+        resultType: "quota",
+        sourceId: "account-a",
+        metric: { kind: "window", window: "day" },
+        unit: undefined,
+      },
+      {
+        resultType: "quota",
+        sourceId: "account-b",
+        metric: { kind: "window", window: "day" },
+        unit: undefined,
+      },
+      {
+        resultType: "budget",
+        sourceId: "account-a",
+        metric: { kind: "window", window: "year" },
+        unit: undefined,
+      },
+      {
+        resultType: "spend",
+        sourceId: "account-a",
+        metric: { kind: "named", name: "Known API" },
+        unit: undefined,
+      },
+      {
+        resultType: "balance",
+        sourceId: "account-a",
+        metric: { kind: "component", component: "total_balance" },
+        unit: { kind: "currency", code: "USD" },
+      },
+      {
+        resultType: "balance",
+        sourceId: "account-a",
+        metric: { kind: "component", component: "total_balance" },
+        unit: { kind: "currency", code: "CNY" },
+      },
+    ]);
+  });
+
+  it("sorts semantic rows only inside contiguous runs and keeps legacy anchors fixed", async () => {
+    const provider = testProvider("synthetic", {
+      entries: [
+        {
+          accounting: { ...TEST_ACCOUNTING, resultType: "balance" },
+          kind: "quantity",
+          name: "Balance",
+          quantity: { decimal: "1", unit: { kind: "currency", code: "USD" } },
+          semantic: {
+            metric: { kind: "component", component: "total_balance" },
+            prominence: "primary",
+          },
+        },
+        {
+          accounting: TEST_ACCOUNTING,
+          name: "Quota",
+          percentRemaining: 50,
+          semantic: { metric: { kind: "aggregate" }, prominence: "primary" },
+        },
+        {
+          accounting: { ...TEST_ACCOUNTING, sourceId: "legacy-one" },
+          kind: "value",
+          name: "Legacy anchor one",
+          value: "one",
+        },
+        {
+          accounting: { ...TEST_ACCOUNTING, resultType: "spend" },
+          kind: "quantity",
+          name: "Spend",
+          quantity: { decimal: "2", unit: { kind: "currency", code: "USD" } },
+          semantic: { metric: { kind: "named", name: "API" }, prominence: "primary" },
+        },
+        {
+          accounting: { ...TEST_ACCOUNTING, resultType: "usage" },
+          kind: "quantity",
+          name: "Usage",
+          quantity: { decimal: "3", unit: { kind: "count", unit: "token" } },
+          semantic: { metric: { kind: "aggregate" }, prominence: "primary" },
+        },
+        {
+          accounting: { ...TEST_ACCOUNTING, sourceId: "legacy-two" },
+          kind: "value",
+          name: "Legacy anchor two",
+          value: "two",
+        },
+        {
+          accounting: { ...TEST_ACCOUNTING, resultType: "balance" },
+          kind: "quantity",
+          name: "First tied balance",
+          quantity: { decimal: "4", unit: { kind: "currency", code: "USD" } },
+          semantic: { metric: { kind: "named", name: "First" }, prominence: "primary" },
+        },
+        {
+          accounting: { ...TEST_ACCOUNTING, resultType: "balance" },
+          kind: "quantity",
+          name: "Second tied balance",
+          quantity: { decimal: "5", unit: { kind: "currency", code: "USD" } },
+          semantic: { metric: { kind: "named", name: "Second" }, prominence: "primary" },
+        },
+      ],
+    });
+
+    const result = await collectQuotaRenderData({
+      client: TEST_CLIENT,
+      config: renderConfig({ enabledProviders: ["synthetic"], accountingDetail: "detailed" }),
+      surfaceExplicitProviderIssues: true,
+      formatStyle: "allWindows",
+      providers: [provider],
+    });
+
+    expect(result.data?.entries.map((entry) => entry.name)).toEqual([
+      "Quota",
+      "Balance",
+      "Legacy anchor one",
+      "Usage",
+      "Spend",
+      "Legacy anchor two",
+      "First tied balance",
+      "Second tied balance",
+    ]);
+
+    const singleWindow = await collectQuotaRenderData({
+      client: TEST_CLIENT,
+      config: renderConfig({ enabledProviders: ["synthetic"], accountingDetail: "detailed" }),
+      surfaceExplicitProviderIssues: true,
+      formatStyle: "singleWindow",
+      providers: [provider],
+    });
+    expect(singleWindow.data?.entries.map((entry) => entry.name)).toEqual([
+      "[Quota]",
+      "[Balance]",
+      "[Legacy anchor one]",
+      "[Usage]",
+      "[Spend]",
+      "[Legacy anchor two]",
+      "[First tied balance]",
+      "[Second tied balance]",
+    ]);
+    expect(provider.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("suppresses a redundant quota family only in render projections", async () => {
     const aliceAccounting = { ...TEST_ACCOUNTING, sourceId: "alice@example.com" };
     const bobAccounting = { ...TEST_ACCOUNTING, sourceId: "bob@example.com" };
-    const googleProvider = testProvider("google-antigravity", {
+    const familyProvider = testProvider("example-family", {
       entries: [
         {
           accounting: aliceAccounting,
-          name: "Antigravity (ali…): Claude",
-          group: "[Antigravity (ali…)]",
+          name: "Example (ali…): Claude",
+          group: "[Example (ali…)]",
           label: "Claude:",
           metricLabel: "Claude:",
           percentRemaining: 12,
@@ -526,8 +1043,8 @@ describe("collectQuotaRenderData shared quota state", () => {
         },
         {
           accounting: bobAccounting,
-          name: "Antigravity (bob…): Claude",
-          group: "[Antigravity (bob…)]",
+          name: "Example (bob…): Claude",
+          group: "[Example (bob…)]",
           label: "Claude:",
           metricLabel: "Claude:",
           percentRemaining: 83,
@@ -537,11 +1054,11 @@ describe("collectQuotaRenderData shared quota state", () => {
       presentation: { classicStrategy: "preserve", redundantQuotaFamily: "Claude" },
     });
 
-    mockProviders.push(googleProvider);
+    mockProviders.push(familyProvider);
     const baseParams = {
       client: TEST_CLIENT,
       config: renderConfig({
-        enabledProviders: ["google-antigravity"],
+        enabledProviders: ["example-family"],
         minIntervalMs: 60_000,
       }),
       surfaceExplicitProviderIssues: true,
@@ -554,13 +1071,13 @@ describe("collectQuotaRenderData shared quota state", () => {
     expect(singleWindow.data?.entries).toEqual([
       {
         accounting: aliceAccounting,
-        name: "[Antigravity (ali…)]",
+        name: "[Example (ali…)]",
         percentRemaining: 12,
         resetTimeIso: "2026-01-01T12:00:00.000Z",
       },
       {
         accounting: bobAccounting,
-        name: "[Antigravity (bob…)]",
+        name: "[Example (bob…)]",
         percentRemaining: 83,
         resetTimeIso: "2026-01-01T08:00:00.000Z",
       },
@@ -573,8 +1090,8 @@ describe("collectQuotaRenderData shared quota state", () => {
     expect(allWindows.data?.entries).toEqual([
       {
         accounting: aliceAccounting,
-        name: "Antigravity (ali…)",
-        group: "[Antigravity (ali…)]",
+        name: "Example (ali…)",
+        group: "[Example (ali…)]",
         label: undefined,
         metricLabel: "Quota",
         percentRemaining: 12,
@@ -582,15 +1099,15 @@ describe("collectQuotaRenderData shared quota state", () => {
       },
       {
         accounting: bobAccounting,
-        name: "Antigravity (bob…)",
-        group: "[Antigravity (bob…)]",
+        name: "Example (bob…)",
+        group: "[Example (bob…)]",
         label: undefined,
         metricLabel: "Quota",
         percentRemaining: 83,
         resetTimeIso: "2026-01-01T08:00:00.000Z",
       },
     ]);
-    expect(googleProvider.fetch).toHaveBeenCalledTimes(1);
+    expect(familyProvider.fetch).toHaveBeenCalledTimes(1);
   });
 
   it("projects Gemini quality tiers as bottleneck-only in single-window and all rows in all-windows", async () => {
@@ -822,7 +1339,7 @@ describe("collectQuotaRenderData shared quota state", () => {
   it("fetches an available but disabled provider once and preserves its status details", async () => {
     const firstProvider = testProvider("synthetic", {
       attempted: false,
-      statusDetails: [{ key: "api_key_source", value: "auth.json" }],
+      statusDetails: [{ key: "api_key_source", value: "opencode.db" }],
       rawDetails: [{ key: "usage_usd", value: "$2.50" }],
     });
     const duplicateProvider = testProvider("synthetic", {
@@ -842,7 +1359,7 @@ describe("collectQuotaRenderData shared quota state", () => {
           attempted: false,
           entries: [],
           errors: [],
-          statusDetails: [{ key: "api_key_source", value: "auth.json" }],
+          statusDetails: [{ key: "api_key_source", value: "opencode.db" }],
           rawDetails: [{ key: "usage_usd", value: "$2.50" }],
         },
       },
@@ -852,7 +1369,7 @@ describe("collectQuotaRenderData shared quota state", () => {
           attempted: false,
           entries: [],
           errors: [],
-          statusDetails: [{ key: "api_key_source", value: "auth.json" }],
+          statusDetails: [{ key: "api_key_source", value: "opencode.db" }],
           rawDetails: [{ key: "usage_usd", value: "$2.50" }],
         },
       },
@@ -863,12 +1380,12 @@ describe("collectQuotaRenderData shared quota state", () => {
 
   it("keeps raw family metadata in quota status live probes", async () => {
     const accounting = { ...TEST_ACCOUNTING, sourceId: "alice@example.com" };
-    const provider = testProvider("google-antigravity", {
+    const provider = testProvider("example-family", {
       entries: [
         {
           accounting,
-          name: "Antigravity (ali…): Claude",
-          group: "[Antigravity (ali…)]",
+          name: "Example (ali…): Claude",
+          group: "[Example (ali…)]",
           label: "Claude:",
           metricLabel: "Claude",
           percentRemaining: 64,
@@ -882,15 +1399,15 @@ describe("collectQuotaRenderData shared quota state", () => {
 
     const probes = await collectQuotaStatusLiveProbes({
       client: TEST_CLIENT,
-      config: renderConfig({ enabledProviders: ["google-antigravity"] }),
+      config: renderConfig({ enabledProviders: ["example-family"] }),
       providers: [provider],
     });
 
     expect(probes[0]?.result.entries).toEqual([
       {
         accounting,
-        name: "Antigravity (ali…): Claude",
-        group: "[Antigravity (ali…)]",
+        name: "Example (ali…): Claude",
+        group: "[Example (ali…)]",
         label: "Claude:",
         metricLabel: "Claude",
         percentRemaining: 64,

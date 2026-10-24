@@ -16,6 +16,12 @@ export const PROVIDER_ACCOUNTING_LEDGER: Record<string, Array<QuotaToastEntry["a
       ownership: "maintained",
       authority: "provider_reported",
     },
+    {
+      resultType: "quota",
+      acquisitionMethod: "remote_api",
+      ownership: "maintained",
+      authority: "provider_reported",
+    },
   ],
   copilot: [
     {
@@ -62,6 +68,12 @@ export const PROVIDER_ACCOUNTING_LEDGER: Record<string, Array<QuotaToastEntry["a
       ownership: "maintained",
       authority: "provider_reported",
     },
+    {
+      resultType: "status",
+      acquisitionMethod: "local_runtime_accounting",
+      ownership: "maintained",
+      authority: "locally_derived",
+    },
   ],
   openrouter: [
     {
@@ -105,26 +117,20 @@ export const PROVIDER_ACCOUNTING_LEDGER: Record<string, Array<QuotaToastEntry["a
       authority: "locally_derived",
     },
   ],
-  "qwen-code": [
-    {
-      resultType: "quota",
-      acquisitionMethod: "local_estimation",
-      ownership: "maintained",
-      authority: "locally_derived",
-    },
-    {
-      resultType: "rate_limit",
-      acquisitionMethod: "local_estimation",
-      ownership: "maintained",
-      authority: "locally_derived",
-    },
-  ],
   "alibaba-coding-plan": [
     {
       resultType: "quota",
       acquisitionMethod: "local_estimation",
       ownership: "maintained",
       authority: "locally_derived",
+    },
+  ],
+  "alibaba-token-plan": [
+    {
+      resultType: "quota",
+      acquisitionMethod: "local_cli",
+      ownership: "maintained",
+      authority: "provider_reported",
     },
   ],
   synthetic: [
@@ -136,14 +142,6 @@ export const PROVIDER_ACCOUNTING_LEDGER: Record<string, Array<QuotaToastEntry["a
     },
   ],
   chutes: [
-    {
-      resultType: "quota",
-      acquisitionMethod: "remote_api",
-      ownership: "maintained",
-      authority: "provider_reported",
-    },
-  ],
-  "google-antigravity": [
     {
       resultType: "quota",
       acquisitionMethod: "remote_api",
@@ -213,7 +211,15 @@ export const PROVIDER_ACCOUNTING_LEDGER: Record<string, Array<QuotaToastEntry["a
       authority: "provider_reported",
     },
   ],
-  "kimi-for-coding": [
+  "kimi-code-plan-global": [
+    {
+      resultType: "quota",
+      acquisitionMethod: "remote_api",
+      ownership: "maintained",
+      authority: "provider_reported",
+    },
+  ],
+  "kimi-code-plan-cn": [
     {
       resultType: "quota",
       acquisitionMethod: "remote_api",
@@ -276,7 +282,7 @@ export const PROVIDER_ACCOUNTING_LEDGER: Record<string, Array<QuotaToastEntry["a
   "opencode-go": [
     {
       resultType: "quota",
-      acquisitionMethod: "dashboard_scrape",
+      acquisitionMethod: "remote_api",
       ownership: "maintained",
       authority: "provider_reported",
     },
@@ -284,13 +290,25 @@ export const PROVIDER_ACCOUNTING_LEDGER: Record<string, Array<QuotaToastEntry["a
   opencode: [
     {
       resultType: "balance",
-      acquisitionMethod: "dashboard_scrape",
+      acquisitionMethod: "remote_api",
       ownership: "maintained",
       authority: "provider_reported",
     },
     {
       resultType: "budget",
-      acquisitionMethod: "dashboard_scrape",
+      acquisitionMethod: "remote_api",
+      ownership: "maintained",
+      authority: "locally_derived",
+    },
+    {
+      resultType: "spend",
+      acquisitionMethod: "remote_api",
+      ownership: "maintained",
+      authority: "provider_reported",
+    },
+    {
+      resultType: "status",
+      acquisitionMethod: "remote_api",
       ownership: "maintained",
       authority: "provider_reported",
     },
@@ -303,7 +321,7 @@ export const PROVIDER_ACCOUNTING_LEDGER: Record<string, Array<QuotaToastEntry["a
       authority: "provider_reported",
     },
     {
-      resultType: "usage",
+      resultType: "balance",
       acquisitionMethod: "remote_api",
       ownership: "maintained",
       authority: "provider_reported",

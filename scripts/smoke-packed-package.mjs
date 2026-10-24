@@ -1,5 +1,6 @@
+import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFile, mkdtemp, readFile, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -61,8 +62,9 @@ try {
     import { fileURLToPath, pathToFileURL } from "node:url";
 
     const rootExportUrl = import.meta.resolve("@slkiser/opencode-quota");
-    await import("@slkiser/opencode-quota");
+    const { default: server } = await import("@slkiser/opencode-quota");
     await import("@slkiser/opencode-quota/server");
+    assert.equal(typeof server.setup, "function");
     const { metrics } = await import("@opentelemetry/api");
     assert.equal(typeof metrics.getMeter, "function");
 
@@ -71,14 +73,14 @@ try {
     assert.match(tuiExportPath, /node_modules\\/\\@slkiser\\/opencode-quota\\/dist\\/tui\\.js$/);
     const tuiSource = await readFile(tuiExportPath, "utf8");
     assert.ok(tuiSource.includes("@slkiser/opencode-quota"));
-    assert.ok(tuiSource.includes("const pluginModule"));
-    assert.ok(tuiSource.includes("tui"));
+    assert.ok(tuiSource.includes("Plugin.define"));
+    assert.ok(tuiSource.includes("prompt.footer"));
     assert.ok(!tuiSource.includes("jsx-dev-runtime"));
 
     const pkg = JSON.parse(
       await readFile("node_modules/@slkiser/opencode-quota/package.json", "utf8"),
     );
-    assert.equal(pkg.engines?.node, ">=22.0.0");
+    assert.equal(pkg.engines?.node, "^22.13.0 || >=23.4.0");
     assert.equal(pkg.dependencies?.["@opentelemetry/api"], "^1.9.1");
     for (const dependencyType of ["devDependencies", "optionalDependencies", "peerDependencies"]) {
       assert.equal(pkg[dependencyType]?.["@opentelemetry/api"], undefined);
@@ -121,6 +123,12 @@ try {
     run(process.execPath, [realOtelFixture, scenario], workdir, { env: isolatedRuntimeEnv });
   }
 
+  const openRouterSecret = "packed-openrouter-secret-canary";
+  const openRouterEnv = { ...isolatedRuntimeEnv, OPENROUTER_API_KEY: openRouterSecret };
+  run(process.execPath, [realOtelFixture, "seed-production-openrouter"], workdir, {
+    env: openRouterEnv,
+  });
+
   const cliPath = path.join(
     workdir,
     "node_modules",
@@ -141,6 +149,45 @@ try {
       throw new Error(`Packed CLI help is missing: ${expected}`);
     }
   }
+
+  const cachedOpenRouterOutput = run(
+    process.execPath,
+    [cliPath, "show", "--json", "--provider", "openrouter"],
+    workdir,
+    { env: openRouterEnv },
+  );
+  const cachedOpenRouter = JSON.parse(cachedOpenRouterOutput);
+  assert.equal(cachedOpenRouter.fromCache, true);
+  assert.equal(cachedOpenRouter.providers.openrouter.status, "ok");
+  assert.equal(
+    cachedOpenRouter.providers.openrouter.entries[0].name,
+    "Packed production OpenRouter",
+  );
+  assert.equal(cachedOpenRouter.providers.openrouter.entries[0].percentRemaining, 67);
+
+  const readTree = async (directory) => {
+    const chunks = [];
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const target = path.join(directory, entry.name);
+      if (entry.isDirectory()) chunks.push(...(await readTree(target)));
+      else if (entry.isFile()) chunks.push(await readFile(target, "utf8"));
+    }
+    return chunks;
+  };
+  const privateArtifacts = [
+    cachedOpenRouterOutput,
+    ...(await readTree(path.join(workdir, "runtime"))),
+  ].join("\n");
+  assert.ok(!privateArtifacts.includes(openRouterSecret));
+  assert.ok(!privateArtifacts.includes("resolvedAuthIdentity"));
+  assert.ok(!privateArtifacts.includes("rai1_"));
+
+  const alibabaTokenPlanFixture = path.join(workdir, "smoke-packed-alibaba-token-plan.mjs");
+  await copyFile(
+    new URL("./fixtures/smoke-packed-alibaba-token-plan.mjs", import.meta.url),
+    alibabaTokenPlanFixture,
+  );
+  run(process.execPath, [alibabaTokenPlanFixture], workdir, { env: isolatedRuntimeEnv });
 
   console.log(
     `Packed package smoke passed for ${artifact.filename} on Node ${process.versions.node} with packaged @opentelemetry/api and host-owned @opentelemetry/sdk-metrics ${sdkMetricsVersion} (sha256 ${artifact.sha256}).`,

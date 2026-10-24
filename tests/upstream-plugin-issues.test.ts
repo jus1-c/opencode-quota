@@ -7,20 +7,22 @@ import {
 } from "../scripts/lib/upstream-plugin-issues.mjs";
 import { getUpstreamPluginSpec } from "../scripts/lib/upstream-plugin-specs.mjs";
 
-const spec = getUpstreamPluginSpec("opencode-qwencode-auth");
+const spec = getUpstreamPluginSpec("opencode-gemini-auth");
 
 const tracked = {
-  npmUrl: "https://www.npmjs.com/package/opencode-qwencode-auth/v/1.2.0",
-  packageName: "opencode-qwencode-auth",
+  npmUrl: "https://www.npmjs.com/package/opencode-gemini-auth/v/1.2.0",
+  packageName: "opencode-gemini-auth",
   publishedAt: "2026-03-01T00:00:00.000Z",
-  referenceDir: "references/upstream-plugins/opencode-qwencode-auth",
-  repo: "gustavodiasdev/opencode-qwencode-auth",
+  referenceDir: "references/upstream-plugins/opencode-gemini-auth",
+  repo: "jenslys/opencode-gemini-auth",
   version: "1.2.0",
 };
 
+const BOT = { login: "github-actions[bot]" };
+
 const latest = {
   ...tracked,
-  npmUrl: "https://www.npmjs.com/package/opencode-qwencode-auth/v/1.3.0",
+  npmUrl: "https://www.npmjs.com/package/opencode-gemini-auth/v/1.3.0",
   publishedAt: "2026-03-20T00:00:00.000Z",
   version: "1.3.0",
 };
@@ -35,23 +37,23 @@ describe("upstream-plugin-issues", () => {
     });
 
     expect(body).toContain("pnpm run upstream:prepare-review");
-    expect(body).toContain("<!-- opencode-quota:plugin=opencode-qwencode-auth -->");
+    expect(body).toContain("<!-- opencode-quota:plugin=opencode-gemini-auth -->");
     expect(body).toContain("<!-- opencode-quota:issue-state=update_available -->");
     expect(body).toContain("<!-- opencode-quota:latest-version=1.3.0 -->");
   });
 
-  it("uses the canonical Cursor package and repo while keeping the internal tracked key stable", () => {
-    const cursorSpec = getUpstreamPluginSpec("opencode-cursor-oauth");
+  it("uses the Cursor companion package and repo in issue details", () => {
+    const cursorSpec = getUpstreamPluginSpec("cursor-opencode-provider");
     expect(cursorSpec).toBeTruthy();
     if (!cursorSpec) return;
 
     const cursorTracked = {
-      npmUrl: "https://www.npmjs.com/package/%40playwo/opencode-cursor-oauth/v/0.4.3",
-      packageName: "@playwo/opencode-cursor-oauth",
-      publishedAt: "2026-04-08T14:04:58.057Z",
-      referenceDir: "references/upstream-plugins/opencode-cursor-oauth",
-      repo: "PoolPirate/opencode-cursor",
-      version: "0.4.3",
+      npmUrl: "https://www.npmjs.com/package/cursor-opencode-provider/v/0.7.3",
+      packageName: "cursor-opencode-provider",
+      publishedAt: "2026-09-20T10:00:00.000Z",
+      referenceDir: "references/upstream-plugins/cursor-opencode-provider",
+      repo: "oakimov/cursor-opencode-provider",
+      version: "0.7.3",
     };
 
     const body = buildUpstreamPluginIssueBody({
@@ -61,10 +63,12 @@ describe("upstream-plugin-issues", () => {
       tracked: cursorTracked,
     });
 
-    expect(body).toContain("- Plugin: `opencode-cursor-oauth`");
-    expect(body).toContain("- Package: `@playwo/opencode-cursor-oauth`");
-    expect(body).toContain("- Repository: `PoolPirate/opencode-cursor`");
-    expect(body).toContain("- Reference path: `references/upstream-plugins/opencode-cursor-oauth`");
+    expect(body).toContain("- Plugin: `cursor-opencode-provider`");
+    expect(body).toContain("- Package: `cursor-opencode-provider`");
+    expect(body).toContain("- Repository: `oakimov/cursor-opencode-provider`");
+    expect(body).toContain(
+      "- Reference path: `references/upstream-plugins/cursor-opencode-provider`",
+    );
   });
 
   it("uses the canonical scoped AGY package and repository in issue details", () => {
@@ -94,26 +98,22 @@ describe("upstream-plugin-issues", () => {
   });
 
   it("treats same-version Cursor metadata drift as an available update", () => {
-    const cursorSpec = getUpstreamPluginSpec("opencode-cursor-oauth");
+    const cursorSpec = getUpstreamPluginSpec("cursor-opencode-provider");
     expect(cursorSpec).toBeTruthy();
     if (!cursorSpec) return;
 
     const trackedCursor = {
-      npmUrl: "https://www.npmjs.com/package/opencode-cursor-oauth/v/0.4.3",
-      packageName: "opencode-cursor-oauth",
-      publishedAt: "2026-04-08T14:04:58.057Z",
-      referenceDir: "references/upstream-plugins/opencode-cursor-oauth",
-      repo: "ephraimduncan/opencode-cursor",
-      version: "0.4.3",
+      npmUrl: "https://www.npmjs.com/package/cursor-opencode-provider/v/0.7.3",
+      packageName: "cursor-opencode-provider",
+      publishedAt: "2026-09-20T10:00:00.000Z",
+      referenceDir: "references/upstream-plugins/cursor-opencode-provider",
+      repo: "old-owner/cursor-opencode-provider",
+      version: "0.7.3",
     };
 
     const latestCursor = {
-      npmUrl: "https://www.npmjs.com/package/%40playwo/opencode-cursor-oauth/v/0.4.3",
-      packageName: "@playwo/opencode-cursor-oauth",
-      publishedAt: "2026-04-08T14:04:58.057Z",
-      referenceDir: "references/upstream-plugins/opencode-cursor-oauth",
-      repo: "PoolPirate/opencode-cursor",
-      version: "0.4.3",
+      ...trackedCursor,
+      repo: "oakimov/cursor-opencode-provider",
     };
 
     const plan = planUpstreamPluginIssueAction({
@@ -124,7 +124,7 @@ describe("upstream-plugin-issues", () => {
     });
 
     expect(plan.create).toMatchObject({
-      title: "[check] opencode-cursor-oauth had update",
+      title: "[check] cursor-opencode-provider had update",
     });
     expect(plan.create?.body).toContain("<!-- opencode-quota:issue-state=update_available -->");
   });
@@ -132,7 +132,7 @@ describe("upstream-plugin-issues", () => {
   it("creates an issue when same-version npm metadata drifts", () => {
     const sameVersionLatest = {
       ...tracked,
-      npmUrl: "https://www.npmjs.com/package/opencode-qwencode-auth/v/1.2.0?activeTab=versions",
+      npmUrl: "https://www.npmjs.com/package/opencode-gemini-auth/v/1.2.0?activeTab=versions",
       publishedAt: "2026-03-02T00:00:00.000Z",
     };
 
@@ -144,7 +144,7 @@ describe("upstream-plugin-issues", () => {
     });
 
     expect(plan.create).toMatchObject({
-      title: "[check] opencode-qwencode-auth had update",
+      title: "[check] opencode-gemini-auth had update",
     });
     expect(plan.create?.body).toContain("<!-- opencode-quota:issue-state=update_available -->");
   });
@@ -158,17 +158,159 @@ describe("upstream-plugin-issues", () => {
     });
 
     expect(plan.create).toMatchObject({
-      title: "[check] opencode-qwencode-auth had update",
+      title: "[check] opencode-gemini-auth had update",
     });
     expect(plan.comments).toEqual([]);
     expect(plan.update).toBeNull();
     expect(plan.close).toEqual([]);
   });
 
+  it("stays quiet when an issue for the same npm version was closed", () => {
+    const closedBody = buildUpstreamPluginIssueBody({
+      issueState: UPSTREAM_PLUGIN_ISSUE_STATE.UPDATE_AVAILABLE,
+      latest,
+      spec,
+      tracked,
+    });
+
+    const plan = planUpstreamPluginIssueAction({
+      closedIssues: [{ body: closedBody, number: 7, user: BOT }],
+      existingIssues: [],
+      latest,
+      spec,
+      tracked,
+    });
+
+    expect(plan.create).toBeNull();
+    expect(plan.update).toBeNull();
+    expect(plan.comments).toEqual([]);
+    expect(plan.close).toEqual([]);
+  });
+
+  it("stays quiet for a closed issue whose body was saved with CRLF line endings", () => {
+    const closedBody = buildUpstreamPluginIssueBody({
+      issueState: UPSTREAM_PLUGIN_ISSUE_STATE.UPDATE_AVAILABLE,
+      latest,
+      spec,
+      tracked,
+    }).replace(/\n/gu, "\r\n");
+
+    const plan = planUpstreamPluginIssueAction({
+      closedIssues: [{ body: closedBody, number: 7, user: BOT }],
+      existingIssues: [],
+      latest,
+      spec,
+      tracked,
+    });
+
+    expect(plan.create).toBeNull();
+  });
+
+  it("opens a new issue when npm publishes a newer version after a closed one", () => {
+    const olderBody = buildUpstreamPluginIssueBody({
+      issueState: UPSTREAM_PLUGIN_ISSUE_STATE.UPDATE_AVAILABLE,
+      latest,
+      spec,
+      tracked,
+    });
+    const newer = {
+      ...latest,
+      npmUrl: "https://www.npmjs.com/package/opencode-gemini-auth/v/1.4.0",
+      publishedAt: "2026-04-01T00:00:00.000Z",
+      version: "1.4.0",
+    };
+    const otherPluginBody = olderBody.replace(
+      "opencode-quota:plugin=opencode-gemini-auth",
+      "opencode-quota:plugin=opencode-agy-auth",
+    );
+
+    const plan = planUpstreamPluginIssueAction({
+      closedIssues: [
+        { body: olderBody, number: 7, user: BOT },
+        {
+          body: otherPluginBody.replace("latest-version=1.3.0", "latest-version=1.4.0"),
+          number: 8,
+          user: BOT,
+        },
+      ],
+      existingIssues: [],
+      latest: newer,
+      spec,
+      tracked,
+    });
+
+    expect(plan.create).toMatchObject({ title: "[check] opencode-gemini-auth had update" });
+    expect(plan.create?.body).toContain("<!-- opencode-quota:latest-version=1.4.0 -->");
+  });
+
+  it("opens a new issue when a closed release is republished with other details", () => {
+    const closedBody = buildUpstreamPluginIssueBody({
+      issueState: UPSTREAM_PLUGIN_ISSUE_STATE.UPDATE_AVAILABLE,
+      latest,
+      spec,
+      tracked,
+    });
+
+    const plan = planUpstreamPluginIssueAction({
+      closedIssues: [{ body: closedBody, number: 7, user: BOT }],
+      existingIssues: [],
+      latest: { ...latest, publishedAt: "2026-03-21T00:00:00.000Z" },
+      spec,
+      tracked,
+    });
+
+    expect(plan.create).toMatchObject({ title: "[check] opencode-gemini-auth had update" });
+  });
+
+  it("ignores closed issues that this workflow did not open", () => {
+    const copiedBody = buildUpstreamPluginIssueBody({
+      issueState: UPSTREAM_PLUGIN_ISSUE_STATE.UPDATE_AVAILABLE,
+      latest,
+      spec,
+      tracked,
+    });
+
+    const plan = planUpstreamPluginIssueAction({
+      closedIssues: [{ body: copiedBody, number: 7, user: { login: "someone" } }],
+      existingIssues: [],
+      latest,
+      spec,
+      tracked,
+    });
+
+    expect(plan.create).toMatchObject({ title: "[check] opencode-gemini-auth had update" });
+  });
+
+  it("treats an issue closed during the run as closed, never updating it", () => {
+    const olderLatest = { ...latest, version: "1.2.5", publishedAt: "2026-03-10T00:00:00.000Z" };
+    const closedDuringRun = {
+      body: buildUpstreamPluginIssueBody({
+        issueState: UPSTREAM_PLUGIN_ISSUE_STATE.UPDATE_AVAILABLE,
+        latest: olderLatest,
+        spec,
+        tracked,
+      }),
+      number: 7,
+      user: BOT,
+    };
+
+    const plan = planUpstreamPluginIssueAction({
+      closedIssues: [closedDuringRun],
+      existingIssues: [closedDuringRun],
+      latest,
+      spec,
+      tracked,
+    });
+
+    expect(plan.update).toBeNull();
+    expect(plan.comments).toEqual([]);
+    expect(plan.create).toMatchObject({ title: "[check] opencode-gemini-auth had update" });
+  });
+
   it("updates the canonical issue, comments on newer releases, and closes duplicates", () => {
     const previousLatest = {
       ...tracked,
-      npmUrl: "https://www.npmjs.com/package/opencode-qwencode-auth/v/1.2.5",
+      npmUrl: "https://www.npmjs.com/package/opencode-gemini-auth/v/1.2.5",
       publishedAt: "2026-03-10T00:00:00.000Z",
       version: "1.2.5",
     };
@@ -183,7 +325,7 @@ describe("upstream-plugin-issues", () => {
             tracked,
           }),
           number: 23,
-          title: "[check] opencode-qwencode-auth had update",
+          title: "[check] opencode-gemini-auth had update",
         },
         {
           body: buildUpstreamPluginIssueBody({
@@ -193,7 +335,7 @@ describe("upstream-plugin-issues", () => {
             tracked,
           }),
           number: 31,
-          title: "[check] opencode-qwencode-auth had update",
+          title: "[check] opencode-gemini-auth had update",
         },
       ],
       latest,
@@ -205,7 +347,7 @@ describe("upstream-plugin-issues", () => {
     expect(plan.update).toMatchObject({ issueNumber: 23 });
     expect(plan.comments).toEqual([
       {
-        body: "Newer upstream npm release detected for opencode-qwencode-auth: 1.2.5 -> 1.3.0.",
+        body: "Newer upstream npm release detected for opencode-gemini-auth: 1.2.5 -> 1.3.0.",
         issueNumber: 23,
       },
     ]);
@@ -224,7 +366,7 @@ describe("upstream-plugin-issues", () => {
         {
           body: "Manually tracked by a maintainer.",
           number: 52,
-          title: "[check] opencode-qwencode-auth had update",
+          title: "[check] opencode-gemini-auth had update",
         },
       ],
       latest,
@@ -233,7 +375,7 @@ describe("upstream-plugin-issues", () => {
     });
 
     expect(plan.create).toMatchObject({
-      title: "[check] opencode-qwencode-auth had update",
+      title: "[check] opencode-gemini-auth had update",
     });
     expect(plan.comments).toEqual([]);
     expect(plan.update).toBeNull();
@@ -251,7 +393,7 @@ describe("upstream-plugin-issues", () => {
             tracked,
           }),
           number: 45,
-          title: "[check] opencode-qwencode-auth had update",
+          title: "[check] opencode-gemini-auth had update",
         },
       ],
       latest: tracked,

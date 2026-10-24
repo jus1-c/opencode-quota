@@ -26,9 +26,11 @@ const USAGE = [
   "  status  Print Quota Status diagnostics (same data as /quota_status)",
   "          --json               Machine-readable JSON output",
   "          --provider <id>      Filter to one provider",
-  "  update  Safely refresh only OpenCode Quota config and verified cache entries",
-  "          --dry-run            Preview without changing config or cache",
-  "          --yes                Apply noninteractively after printing the preview",
+  "  update  Preview safe setting/package-cache changes and report legacy credential findings",
+  "          Credential-specific audit sources and values are not read",
+  "          Values encountered in normal config parsing are never printed, copied, or modified",
+  "          --dry-run            Print the full responsible preview without changing anything",
+  "          --yes                Apply only safe setting/cache work after printing the preview",
   "  provider add  Add or update one global quotaProviders definition",
   "          --dry-run            Preview the exact global OpenCode config without writing",
 ].join("\n");
@@ -55,6 +57,25 @@ export function cliShouldRunMain(
   }
 
   return resolvePath(modulePath) === resolvePath(argv1);
+}
+
+/**
+ * `show` and `status` read OpenCode's database through node:sqlite, and Node prints
+ * "ExperimentalWarning: SQLite is an experimental feature..." when it loads. Hide only
+ * that warning; every other warning still prints. Call before node:sqlite loads.
+ */
+export function hideSqliteExperimentalWarning(): void {
+  const emitWarning = process.emitWarning;
+  process.emitWarning = ((warning: string | Error, ...rest: unknown[]) => {
+    if (
+      typeof warning === "string" &&
+      rest[0] === "ExperimentalWarning" &&
+      warning.startsWith("SQLite is an experimental feature")
+    ) {
+      return;
+    }
+    return (emitWarning as (...args: unknown[]) => void).call(process, warning, ...rest);
+  }) as typeof process.emitWarning;
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
@@ -105,6 +126,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 }
 
 if (cliShouldRunMain()) {
+  hideSqliteExperimentalWarning();
   void main().then((code) => {
     process.exitCode = code;
   });

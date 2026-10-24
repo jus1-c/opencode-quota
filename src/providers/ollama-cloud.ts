@@ -1,8 +1,8 @@
 /**
  * Ollama Cloud provider wrapper.
  *
- * Queries the Ollama Cloud usage API and reports session/weekly quota plus
- * provider-reported per-model request counts.
+ * Queries the Ollama Cloud balance API and reports included credits or
+ * session/weekly limits, plus purchased credits.
  */
 
 import type {
@@ -32,10 +32,6 @@ const REMOTE_API_ACCOUNTING = {
 
 type OllamaCloudSuccess = Extract<OllamaCloudResult, { success: true }>;
 
-function formatRequestCount(requests: number): string {
-  return `${requests} ${requests === 1 ? "request" : "requests"}`;
-}
-
 function mapOllamaCloudSuccess(result: OllamaCloudSuccess): QuotaProviderResult {
   const entries: QuotaToastEntry[] = [];
 
@@ -49,6 +45,7 @@ function mapOllamaCloudSuccess(result: OllamaCloudSuccess): QuotaProviderResult 
       group: OLLAMA_CLOUD_PROVIDER_LABEL,
       label: "Session:",
       percentRemaining: result.session.percentRemaining,
+      ...(result.session.resetTimeIso ? { resetTimeIso: result.session.resetTimeIso } : {}),
     });
   }
 
@@ -62,21 +59,38 @@ function mapOllamaCloudSuccess(result: OllamaCloudSuccess): QuotaProviderResult 
       group: OLLAMA_CLOUD_PROVIDER_LABEL,
       label: "Weekly:",
       percentRemaining: result.weekly.percentRemaining,
+      ...(result.weekly.resetTimeIso ? { resetTimeIso: result.weekly.resetTimeIso } : {}),
     });
   }
 
-  for (const model of result.models) {
+  // Included credits run on the plan's monthly period.
+  const included = result.includedCredits;
+  if (included?.percentRemaining !== undefined) {
+    entries.push({
+      accounting: {
+        resultType: "quota",
+        ...REMOTE_API_ACCOUNTING,
+      },
+      name: `${OLLAMA_CLOUD_PROVIDER_LABEL} Monthly`,
+      group: OLLAMA_CLOUD_PROVIDER_LABEL,
+      label: "Monthly:",
+      percentRemaining: included.percentRemaining,
+      ...(included.resetTimeIso ? { resetTimeIso: included.resetTimeIso } : {}),
+    });
+  }
+
+  // Purchased credits show when there are some, or when they are the only data.
+  if (result.purchasedUsd !== undefined && (result.purchasedUsd > 0 || entries.length === 0)) {
     entries.push({
       kind: "value",
       accounting: {
-        resultType: "usage",
+        resultType: "balance",
         ...REMOTE_API_ACCOUNTING,
       },
-      name: `${OLLAMA_CLOUD_PROVIDER_LABEL} ${model.model}`,
+      name: `${OLLAMA_CLOUD_PROVIDER_LABEL} Purchased`,
       group: OLLAMA_CLOUD_PROVIDER_LABEL,
-      label: `${model.model}:`,
-      metricLabel: model.model,
-      value: formatRequestCount(model.requests),
+      label: "Purchased:",
+      value: `$${result.purchasedUsd.toFixed(2)} left`,
     });
   }
 
@@ -87,15 +101,20 @@ function mapOllamaCloudSuccess(result: OllamaCloudSuccess): QuotaProviderResult 
   if (entries.length === 0) {
     errors.push({
       label: OLLAMA_CLOUD_PROVIDER_LABEL,
-      message: "No usable Ollama Cloud usage data",
+      message: "Ollama Cloud returned no limits or balance",
     });
   }
 
   return withStatusDetails(attemptedResult(entries, errors), [
     ...statusDetailsFromRecord({
-      session_usage_fraction: result.session?.usageFraction.toString(),
-      weekly_usage_fraction: result.weekly?.usageFraction.toString(),
-      model_rows: result.models.length.toString(),
+      included_balance_usd: included?.balanceUsd.toString(),
+      included_allowance_usd: included?.allowanceUsd.toString(),
+      included_period_until: included?.resetTimeIso,
+      session_remaining_percent: result.session?.percentRemaining.toString(),
+      session_resets_at: result.session?.resetTimeIso,
+      weekly_remaining_percent: result.weekly?.percentRemaining.toString(),
+      weekly_resets_at: result.weekly?.resetTimeIso,
+      purchased_balance_usd: result.purchasedUsd?.toString(),
     }),
     ...(result.rowErrors ?? []).map((message, index) => ({
       key: `live_error_${index + 1}`,
@@ -120,7 +139,7 @@ export const ollamaCloudProvider: QuotaProvider = {
       configured: false,
       source: null,
       checkedPaths: [],
-      authPaths: [],
+      credentialDatabasePaths: [],
     }));
     const result = await queryOllamaCloudQuota({
       requestTimeoutMs: ctx.config?.requestTimeoutMs,

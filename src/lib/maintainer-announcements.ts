@@ -50,9 +50,23 @@ export const BUNDLED_MAINTAINER_ANNOUNCEMENTS: readonly MaintainerAnnouncement[]
     endsAt: "2026-08-22T00:00:00.000Z",
   },
   {
-    id: "google-gemini-cli-deprecated",
+    id: "opencode-2-feedback",
+    message: "OpenCode Quota 5.0 runs on OpenCode 2. Ideas for the next version? Tell us!",
+    url: "https://github.com/slkiser/opencode-quota/issues/293",
+    startsAt: "2026-09-25T00:00:00.000Z",
+    endsAt: "2026-11-25T00:00:00.000Z",
+  },
+  {
+    id: "opencode-ecosystem-listing-thumbs-up",
+    message: "Help OpenCode list this plugin: add a thumbs-up to issue #38281.",
+    url: "https://github.com/anomalyco/opencode/issues/38281",
+    startsAt: "2026-09-26T00:00:00.000Z",
+    endsAt: "2026-10-26T00:00:00.000Z",
+  },
+  {
+    id: "google-gemini-cli-org-only",
     message:
-      "Gemini CLI quota support in OpenCode Quota is deprecated, with removal planned for v5.0.0. Existing v4 configurations continue to work. Google's official Antigravity CLI replaces the individual Gemini CLI experience. Google AI Studio or Vertex AI are the supported choices for third-party access. OpenCode Quota's Google integrations are independent and are not endorsed by Google.",
+      "Gemini CLI quota support stays. It only works with Gemini Code Assist Standard or Enterprise (organization) accounts because Google ended personal accounts on 2026-06-18. Personal Google users should use Google AGY.",
     providerIds: ["google-gemini-cli"],
   },
 ];
@@ -77,6 +91,23 @@ function normalizedProviderIds(providerIds: readonly string[]): CanonicalQuotaPr
     }
     seen.add(shape.id);
     out.push(shape.id);
+  }
+
+  return out;
+}
+
+export function getMaintainerAnnouncementTargetProviderIds(params?: {
+  announcements?: readonly MaintainerAnnouncement[];
+}): CanonicalQuotaProviderId[] {
+  const out: CanonicalQuotaProviderId[] = [];
+  const seen = new Set<CanonicalQuotaProviderId>();
+
+  for (const announcement of params?.announcements ?? BUNDLED_MAINTAINER_ANNOUNCEMENTS) {
+    for (const providerId of normalizedProviderIds(announcement.providerIds ?? [])) {
+      if (seen.has(providerId)) continue;
+      seen.add(providerId);
+      out.push(providerId);
+    }
   }
 
   return out;

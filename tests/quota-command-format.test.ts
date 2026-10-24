@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { formatQuotaCommand, QUOTA_COMMAND_BAR_WIDTH } from "../src/lib/quota-command-format.js";
+import { formatLocalCallTimestamp } from "../src/lib/format-utils.js";
+import {
+  buildQuotaCommandDocument,
+  formatQuotaCommand,
+  QUOTA_COMMAND_BAR_WIDTH,
+} from "../src/lib/quota-command-format.js";
 
 function accounting(
   resultType: "quota" | "rate_limit" | "usage" | "spend" | "budget" | "balance" | "status",
@@ -60,8 +65,9 @@ describe("formatQuotaCommand", () => {
         },
         {
           accounting: accounting("quota"),
-          name: "Claude (acct)",
-          metricLabel: "Claude",
+          name: "Gemini (acct)",
+          group: "AGY (acct): Gemini",
+          label: "Weekly:",
           percentRemaining: 67,
           resetTimeIso: "2026-01-15T15:00:00.000Z",
         },
@@ -93,17 +99,17 @@ describe("formatQuotaCommand", () => {
     expect(out.match(/[█░]{10}/gu)).toHaveLength(4);
     expect(lines.slice(2).join("\n")).toMatchInlineSnapshot(`
       "→ [Copilot] (personal)
-        Quota         █████████░   86% left | 42/300 | reset 12h
+        Quota         █████████░   86% left | 42/300 | reset 12h0m
 
       → [Copilot] (business)
-        Usage         9 used | 2026-01 | org=acme-corp | user=alice | reset 17d
+        Usage         9 used | 2026-01 | org=acme-corp | user=alice | reset 16d12h0m
 
       → [OpenAI] (Pro)
-        5h quota      ████░░░░░░   42% left | reset 2h
-        Week quota    ████████░░   81% left | reset 3d
+        5h quota      ████░░░░░░   42% left | reset 2h0m
+        Week quota    ████████░░   81% left | reset 3d0h0m
 
-      → [Antigravity (acct)]
-        Claude        ███████░░░   67% left | reset 3h
+      → [AGY (acct): Gemini]
+        Week quota    ███████░░░   67% left | reset 3h0m
 
       Session input/output tokens
         openai/gpt-5: 1.2K in | 456 cached | 567 out
@@ -350,8 +356,8 @@ describe("formatQuotaCommand", () => {
     const rows = output.split("\n").filter((line) => line.includes(" | reset "));
 
     expect(rows).toEqual([
-      "  5h quota      ██████░░░░   60% left | 2/5  | reset 5h",
-      "  Day quota     ████████░░   80% left | 2/10 | reset 11h",
+      "  5h quota      ██████░░░░   60% left | 2/5  | reset 5h0m",
+      "  Day quota     ████████░░   80% left | 2/10 | reset 11h0m",
     ]);
     expect(output).not.toContain("```");
     expect(output).not.toMatch(/^## /mu);
@@ -368,7 +374,7 @@ describe("formatQuotaCommand", () => {
     expect(output).toContain("Example: secondary source failed");
   });
 
-  it("keeps /quota reset formatting independent from compact toast resets", () => {
+  it("uses the shared precise-to-minute reset formatter", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-15T10:00:00.000Z"));
 
@@ -385,8 +391,40 @@ describe("formatQuotaCommand", () => {
       errors: [],
     });
 
-    // /quota keeps its own formatter (hour-rounded here), not toast compact rounding.
-    expect(out).toContain("reset 3h");
+    expect(out).toContain("reset 2h40m");
+  });
+
+  it("renders an expired reset once and omits a missing reset", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-15T10:00:00.000Z"));
+
+    const expired = formatQuotaCommand({
+      entries: [
+        {
+          name: "OpenAI",
+          group: "OpenAI",
+          label: "Weekly:",
+          percentRemaining: 81,
+          resetTimeIso: "2026-01-15T09:59:59.999Z",
+        },
+      ],
+      errors: [],
+    });
+    const missing = formatQuotaCommand({
+      entries: [
+        {
+          name: "OpenAI",
+          group: "OpenAI",
+          label: "Weekly:",
+          percentRemaining: 81,
+        },
+      ],
+      errors: [],
+    });
+
+    expect(expired).toMatch(/\| reset$/mu);
+    expect(expired).not.toContain("reset reset");
+    expect(missing).not.toContain("reset");
   });
 
   it("aligns reset columns when usage values have different widths", () => {
@@ -454,5 +492,174 @@ describe("formatQuotaCommand", () => {
     expect(metric).toMatch(/^ {2}\S/u);
     expect(metric).not.toContain("```");
     expect(Array.from(metric).length).toBeLessThanOrEqual(76);
+  });
+
+  it("uses a report heading to disambiguate bare used labels and spaces reset units", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-15T12:00:00.000Z"));
+
+    const out = formatQuotaCommand({
+      entries: [
+        {
+          accounting: accounting("quota"),
+          name: "OpenAI (Pro) Weekly",
+          group: "OpenAI (Pro)",
+          label: "Weekly:",
+          percentRemaining: 81,
+          resetTimeIso: "2026-01-18T17:14:00.000Z",
+        },
+      ],
+      errors: [],
+      percentDisplayMode: "used",
+      percentLabelStyle: "bare",
+      resetTimeSpaced: true,
+      generatedAtMs: Date.now(),
+    });
+
+    expect(out.split("\n")[0]).toMatch(/^Quota \[Used\] \(\/quota\) /u);
+    expect(out).toContain("19%");
+    expect(out).not.toContain("19% used");
+    expect(out).toContain("reset 3d 5h 14m");
+  });
+
+  it("keeps the /quota title line in text and gives the dialog the time and bare-label mode", () => {
+    const generatedAtMs = Date.UTC(2026, 8, 29, 14, 0);
+    const time = formatLocalCallTimestamp(generatedAtMs);
+    const data = {
+      entries: [{ accounting: accounting("quota"), name: "Copilot", percentRemaining: 81 }],
+      errors: [],
+      generatedAtMs,
+    };
+    const cases = [
+      { options: {}, line: `Quota (/quota) ${time}`, subtitle: time },
+      {
+        options: { percentLabelStyle: "bare", percentDisplayMode: "used" },
+        line: `Quota [Used] (/quota) ${time}`,
+        subtitle: `Percent used · ${time}`,
+      },
+      {
+        options: { percentLabelStyle: "bare", percentDisplayMode: "remaining" },
+        line: `Quota [Remaining] (/quota) ${time}`,
+        subtitle: `Percent remaining · ${time}`,
+      },
+    ] as const;
+
+    for (const { options, line, subtitle } of cases) {
+      const text = formatQuotaCommand({ ...data, ...options });
+      const document = buildQuotaCommandDocument({ ...data, ...options });
+      expect(text.split("\n").slice(0, 2)).toEqual([line, ""]);
+      expect(document.heading).toEqual({ line, subtitle });
+      // The sections, which the dialog draws, start with the first provider group.
+      expect(document.sections[0]?.title).toBe("→ [Copilot]");
+    }
+  });
+
+  it("gives the dialog each row's parts beside the unchanged chat lines", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-15T12:00:00.000Z"));
+    const params = {
+      entries: [
+        {
+          accounting: accounting("quota"),
+          name: "Copilot",
+          label: "Quota:",
+          right: "42/300",
+          percentRemaining: 86,
+          resetTimeIso: "2026-01-16T00:00:00.000Z",
+          runway: { kind: "lasts_past_reset" as const },
+        },
+        {
+          accounting: accounting("usage"),
+          name: "Copilot",
+          label: "Usage:",
+          kind: "value" as const,
+          value: "9 used",
+        },
+      ],
+      errors: [],
+    };
+
+    const document = buildQuotaCommandDocument(params);
+
+    const block = document.sections[0]?.blocks[0];
+    expect(block?.kind).toBe("quota");
+    if (block?.kind !== "quota") return;
+    // The text shows the lines, exactly as formatQuotaCommand prints them.
+    expect(formatQuotaCommand(params).split("\n").slice(3)).toEqual(block.lines);
+    expect(block.rows).toEqual([
+      {
+        label: "Quota",
+        barPercent: 86,
+        value: "86%",
+        usage: "42/300",
+        reset: "12h0m",
+        notes: ["Runs out lasts past reset"],
+      },
+      { label: "Usage", value: "9 used", notes: [] },
+    ]);
+    expect(block.provider).toBe("Copilot");
+    expect(block.percentMode).toBe("remaining");
+    // The RPC output must be plain JSON: no part is undefined.
+    expect(JSON.parse(JSON.stringify(block.rows))).toStrictEqual(block.rows);
+  });
+
+  it("names a time window's quota by its window alone in the dialog, and keeps other labels", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-15T12:00:00.000Z"));
+    const params = {
+      entries: [
+        {
+          accounting: accounting("quota"),
+          name: "OpenAI",
+          label: "5h:",
+          percentRemaining: 100,
+          resetTimeIso: "2026-01-15T11:00:00.000Z",
+        },
+        {
+          accounting: accounting("quota"),
+          name: "OpenAI",
+          semantic: {
+            metric: { kind: "window" as const, window: "week" as const },
+            prominence: "primary" as const,
+          },
+          percentRemaining: 72,
+        },
+        {
+          accounting: accounting("quota"),
+          name: "OpenAI",
+          semantic: {
+            metric: { kind: "window" as const, window: "mcp" as const },
+            prominence: "primary" as const,
+          },
+          percentRemaining: 50,
+        },
+        {
+          accounting: accounting("spend"),
+          name: "OpenAI",
+          group: "[OpenAI] (Business)",
+          label: "Monthly spend:",
+          kind: "value" as const,
+          value: "USD 0.00",
+        },
+      ],
+      errors: [],
+      percentDisplayMode: "used" as const,
+    };
+
+    const document = buildQuotaCommandDocument(params);
+    const block = document.sections[0]?.blocks[0];
+    if (block?.kind !== "quota") throw new Error("expected a quota block");
+    // The dialog's provider rows drop the brackets of an OpenCode login's group.
+    expect(document.sections[1]?.title).toBe("→ [OpenAI] (Business)");
+    expect(document.sections[1]?.blocks[0]).toMatchObject({ provider: "OpenAI (Business)" });
+    expect(block.provider).toBe("OpenAI");
+    // The chat keeps its labels; the dialog's are shorter only for time windows.
+    expect(block.lines.join("\n")).toContain("5h quota");
+    expect(block.rows.map((row) => row.label)).toEqual(["5h", "Weekly", "MCP quota"]);
+    expect(document.sections[1]?.blocks[0]).toMatchObject({ rows: [{ label: "Month spend" }] });
+    // A due reset shows "now"; with percentDisplayMode "used" the percents are the part used.
+    expect(block.rows[0]).toMatchObject({ barPercent: 0, value: "0%", reset: "now" });
+    expect(block.rows[1]).toMatchObject({ barPercent: 28, value: "28%" });
+    expect(block.percentMode).toBe("used");
   });
 });

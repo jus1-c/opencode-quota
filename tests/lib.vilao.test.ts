@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { queryVilaoQuota, VILAO_PAT_METADATA_KEY } from "../src/lib/vilao.js";
@@ -8,7 +10,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../src/lib/opencode-auth.js", () => ({
   readAuthFile: mocks.readAuthFile,
-  getAuthPaths: vi.fn(() => ["/tmp/auth.json"]),
+  getCredentialDatabasePaths: vi.fn(() => ["/tmp/opencode.db"]),
 }));
 
 function auth() {
@@ -32,13 +34,22 @@ describe("vilao quota", () => {
     await expect(queryVilaoQuota()).resolves.toBeNull();
   });
 
-  it("starts at 100 percent and keeps the observed high-water baseline", async () => {
+  it("resets the baseline to 100 percent whenever the balance rises", async () => {
     mocks.readAuthFile.mockResolvedValue(auth());
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { balance: 100000 } }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { balance: 40000 } }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { balance: 120000 } }), { status: 200 }));
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: { balance: 100000 } }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: { balance: 40000 } }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: { balance: 80000 } }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: { balance: 60000 } }), { status: 200 }),
+      );
     vi.stubGlobal("fetch", fetchMock);
     let saved = "";
     const dependencies = {
@@ -67,9 +78,15 @@ describe("vilao quota", () => {
     });
     await expect(queryVilaoQuota({}, dependencies)).resolves.toMatchObject({
       success: true,
-      balance: 120000,
-      baseline: 120000,
+      balance: 80000,
+      baseline: 80000,
       percentRemaining: 100,
+    });
+    await expect(queryVilaoQuota({}, dependencies)).resolves.toMatchObject({
+      success: true,
+      balance: 60000,
+      baseline: 80000,
+      percentRemaining: 75,
     });
     expect(saved).not.toContain("pat-secret");
     expect(fetchMock).toHaveBeenCalledWith(
@@ -80,29 +97,79 @@ describe("vilao quota", () => {
     );
   });
 
+  it("keeps a saved baseline from state written before lastBalanceCents existed", async () => {
+    mocks.readAuthFile.mockResolvedValue(auth());
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () => new Response(JSON.stringify({ data: { balance: 50000 } }), { status: 200 }),
+      ),
+    );
+    const legacyState = JSON.stringify({
+      version: 1,
+      accountFingerprint: createHash("sha256").update("pat-secret").digest("hex"),
+      baselineCents: 10_000_000,
+      updatedAt: 1,
+    });
+    let saved = legacyState;
+    const dependencies = {
+      readText: async () => saved,
+      writeState: async (_path: string, state: unknown) => {
+        saved = JSON.stringify(state);
+      },
+    };
+
+    // No lastBalanceCents means the previous balance is unknown, so the read
+    // cannot prove a rise and must keep the stored baseline.
+    await expect(queryVilaoQuota({}, dependencies)).resolves.toMatchObject({
+      success: true,
+      balance: 50000,
+      baseline: 100000,
+      percentRemaining: 50,
+    });
+    expect(JSON.parse(saved)).toMatchObject({
+      baselineCents: 10_000_000,
+      lastBalanceCents: 5_000_000,
+    });
+  });
+
   it("rounds API float noise to currency cents", async () => {
     mocks.readAuthFile.mockResolvedValue(auth());
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response(JSON.stringify({ data: { balance: 39742.238790000054 } }), { status: 200 })),
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ data: { balance: 39742.238790000054 } }), { status: 200 }),
+      ),
     );
-    const result = await queryVilaoQuota({}, {
-      readText: async () => { throw Object.assign(new Error("missing"), { code: "ENOENT" }); },
-      writeState: async () => {},
-    });
+    const result = await queryVilaoQuota(
+      {},
+      {
+        readText: async () => {
+          throw Object.assign(new Error("missing"), { code: "ENOENT" });
+        },
+        writeState: async () => {},
+      },
+    );
     expect(result).toMatchObject({ success: true, balance: 39742.24, baseline: 39742.24 });
   });
 
   it("returns a reconnect error when the PAT is rejected", async () => {
     mocks.readAuthFile.mockResolvedValue(auth());
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("Unauthorized", { status: 401 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("Unauthorized", { status: 401 })),
+    );
     const result = await queryVilaoQuota();
     expect(result && !result.success ? result.error : "").toContain("Run /connect");
   });
 
   it("redacts a PAT echoed by an API error", async () => {
     mocks.readAuthFile.mockResolvedValue(auth());
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("bad pat-secret", { status: 500 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("bad pat-secret", { status: 500 })),
+    );
     const result = await queryVilaoQuota();
     expect(result && !result.success ? result.error : "").toContain("[redacted]");
     expect(result && !result.success ? result.error : "").not.toContain("pat-secret");
@@ -115,10 +182,13 @@ describe("vilao quota", () => {
       vi.fn(async () => new Response(JSON.stringify({ data: { balance: 100 } }), { status: 200 })),
     );
     const writeState = vi.fn();
-    const result = await queryVilaoQuota({}, {
-      readText: async () => "not json",
-      writeState,
-    });
+    const result = await queryVilaoQuota(
+      {},
+      {
+        readText: async () => "not json",
+        writeState,
+      },
+    );
     expect(result && !result.success ? result.error : "").toBeTruthy();
     expect(writeState).not.toHaveBeenCalled();
   });

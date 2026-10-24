@@ -9,21 +9,21 @@
 
 import { existsSync } from "fs";
 import { join } from "path";
-import { getEffectiveConfigRoot } from "./config-file-utils.js";
 import { isResetTimeDecimals } from "./format-utils.js";
 import {
   buildOpenCodeConfigCandidates,
   readOpenCodeConfigCandidate,
 } from "./opencode-config-read.js";
-import { getOpencodeRuntimeDirCandidates } from "./opencode-runtime-paths.js";
+import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
 import { getQuotaProviderShape, normalizeQuotaProviderId } from "./provider-metadata.js";
 import { isQuotaFormatStyle, resolveQuotaFormatStyle } from "./quota-format-style.js";
 import { cloneQuotaProviders, validateQuotaProviders } from "./quota-providers.js";
 import type {
   CursorQuotaPlan,
-  GoogleModelId,
   PercentDisplayMode,
+  PercentLabelStyle,
   PricingSnapshotSource,
+  QuotaResetWindow,
   QuotaToastConfig,
   SessionTokenScope,
   TuiCommandDisplay,
@@ -39,17 +39,22 @@ export const QUOTA_TOAST_CONFIG_RELATIVE_PATH = QUOTA_TOAST_CONFIG_RELATIVE_PATH
 export const QUOTA_TOAST_SETTING_SOURCE_KEYS = [
   "enabled",
   "enableToast",
+  "resetNotifications.enabled",
+  "resetNotifications.windows",
   "tuiCommandDisplay",
   "formatStyle",
   "percentDisplayMode",
+  "quotaProjection",
+  "percentLabelStyle",
+  "accountingDetail",
   "resetTimeDecimals",
+  "resetTimeSpaced",
   "minIntervalMs",
   "requestTimeoutMs",
   "debug",
   "enabledProviders",
   "quotaProviders",
   "anthropicBinaryPath",
-  "googleModels",
   "cursorPlan",
   "cursorIncludedApiUsd",
   "cursorBillingCycleStartDay",
@@ -63,18 +68,21 @@ export const QUOTA_TOAST_SETTING_SOURCE_KEYS = [
   "showOnBothFail",
   "toastDurationMs",
   "onlyCurrentModel",
+  "waitForQuotaReset",
   "showSessionTokens",
   "sessionTokenScope",
   "tuiSidebarPanel.enabled",
   "tuiSidebarPanel.formatStyle",
+  "tuiSidebarPanel.opencodeGoPreferredWindow",
   "tuiCompactStatus.enabled",
   "tuiCompactStatus.homeBottom",
   "tuiCompactStatus.sessionPrompt",
-  "tuiCompactStatus.suppressWhenNativeProviderQuota",
   "tuiCompactStatus.maxWidth",
   "tuiCompactStatus.formatStyle",
+  "tuiPromptBar.enabled",
   "maintainerAnnouncements.enabled",
   "maintainerAnnouncements.home",
+  "maintainerAnnouncements.homeFrequency",
   "layout.maxWidth",
   "layout.narrowAt",
   "layout.tinyAt",
@@ -135,8 +143,10 @@ const NETWORK_SETTING_SOURCE_KEYS = [
 ] as const satisfies readonly QuotaToastSettingSourceKey[];
 
 type PricingSnapshotPatch = Partial<QuotaToastConfig["pricingSnapshot"]>;
+type QuotaResetNotificationsPatch = Partial<QuotaToastConfig["resetNotifications"]>;
 type TuiSidebarPanelPatch = Partial<QuotaToastConfig["tuiSidebarPanel"]>;
 type TuiCompactStatusPatch = Partial<QuotaToastConfig["tuiCompactStatus"]>;
+type TuiPromptBarPatch = Partial<QuotaToastConfig["tuiPromptBar"]>;
 type MaintainerAnnouncementsPatch = Partial<QuotaToastConfig["maintainerAnnouncements"]>;
 type LayoutPatch = Partial<QuotaToastConfig["layout"]>;
 type ExportConfigPatch = Partial<QuotaToastConfig["export"]>;
@@ -145,17 +155,21 @@ type TelemetryConfigPatch = Partial<QuotaToastConfig["telemetry"]>;
 type ValidatedQuotaToastPatch = {
   enabled?: boolean;
   enableToast?: boolean;
+  resetNotifications?: QuotaResetNotificationsPatch;
   tuiCommandDisplay?: TuiCommandDisplay;
   formatStyle?: QuotaToastConfig["formatStyle"];
   percentDisplayMode?: PercentDisplayMode;
+  quotaProjection?: "runway";
+  percentLabelStyle?: PercentLabelStyle;
+  accountingDetail?: QuotaToastConfig["accountingDetail"];
   resetTimeDecimals?: number;
+  resetTimeSpaced?: boolean;
   minIntervalMs?: number;
   requestTimeoutMs?: number;
   debug?: boolean;
   enabledProviders?: string[] | "auto";
   enabledProvidersInvalidEmpty?: boolean;
   anthropicBinaryPath?: string;
-  googleModels?: GoogleModelId[];
   cursorPlan?: CursorQuotaPlan;
   cursorIncludedApiUsd?: number;
   cursorBillingCycleStartDay?: number;
@@ -168,20 +182,22 @@ type ValidatedQuotaToastPatch = {
   showOnBothFail?: boolean;
   toastDurationMs?: number;
   onlyCurrentModel?: boolean;
+  waitForQuotaReset?: boolean;
   showSessionTokens?: boolean;
   sessionTokenScope?: SessionTokenScope;
   tuiSidebarPanel?: TuiSidebarPanelPatch;
   tuiCompactStatus?: TuiCompactStatusPatch;
+  tuiPromptBar?: TuiPromptBarPatch;
   maintainerAnnouncements?: MaintainerAnnouncementsPatch;
   layout?: LayoutPatch;
   export?: ExportConfigPatch;
   telemetry?: TelemetryConfigPatch;
 };
 
-type ConfigLayerScope = "global" | "workspace";
-type ConfigLayerKind = "legacy" | "plugin";
+export type ConfigLayerScope = "global" | "workspace";
+export type ConfigLayerKind = "legacy" | "plugin";
 
-interface ConfigLayerCandidate {
+export interface ConfigLayerCandidate {
   path: string;
   rootDir: string;
   scope: ConfigLayerScope;
@@ -211,13 +227,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-/**
- * Validates and normalizes a Google model ID
- */
-function isValidGoogleModelId(id: unknown): id is GoogleModelId {
-  return typeof id === "string" && ["G3PRO", "G3FLASH", "CLAUDE", "G3IMAGE", "GPTOSS"].includes(id);
-}
-
 function isValidCursorQuotaPlan(plan: unknown): plan is CursorQuotaPlan {
   return typeof plan === "string" && ["none", "pro", "pro-plus", "ultra"].includes(plan);
 }
@@ -232,6 +241,14 @@ function isValidPricingSnapshotAutoRefresh(value: unknown): value is number {
 
 function isValidPercentDisplayMode(value: unknown): value is PercentDisplayMode {
   return value === "remaining" || value === "used";
+}
+
+function isValidPercentLabelStyle(value: unknown): value is PercentLabelStyle {
+  return value === "full" || value === "bare";
+}
+
+function isValidAccountingDetail(value: unknown): value is QuotaToastConfig["accountingDetail"] {
+  return value === "summary" || value === "detailed";
 }
 
 function isValidTuiCommandDisplay(value: unknown): value is TuiCommandDisplay {
@@ -252,16 +269,21 @@ function isValidCursorBillingCycleStartDay(value: unknown): value is number {
 
 const VALID_OPENCODE_GO_WINDOWS = ["rolling", "weekly", "monthly"] as const;
 
+function isValidOpenCodeGoWindow(
+  value: unknown,
+): value is QuotaToastConfig["opencodeGoWindows"][number] {
+  return (
+    typeof value === "string" &&
+    VALID_OPENCODE_GO_WINDOWS.includes(value as (typeof VALID_OPENCODE_GO_WINDOWS)[number])
+  );
+}
+
 function isValidOpenCodeGoWindows(
   value: unknown,
 ): value is Array<"rolling" | "weekly" | "monthly"> {
   if (!Array.isArray(value)) return false;
   if (value.length === 0) return false;
-  return value.every(
-    (v) =>
-      typeof v === "string" &&
-      VALID_OPENCODE_GO_WINDOWS.includes(v as (typeof VALID_OPENCODE_GO_WINDOWS)[number]),
-  );
+  return value.every(isValidOpenCodeGoWindow);
 }
 
 function normalizeOptionalString(value: unknown): string | undefined {
@@ -318,17 +340,62 @@ function cloneConfig(config: QuotaToastConfig): QuotaToastConfig {
       ? [...config.enabledProviders]
       : config.enabledProviders,
     quotaProviders: cloneQuotaProviders(config.quotaProviders),
-    googleModels: [...config.googleModels],
+    resetNotifications: {
+      ...config.resetNotifications,
+      windows: [...config.resetNotifications.windows],
+    },
     opencodeGoWindows: [...config.opencodeGoWindows],
     opencodeMonthlyLimit: config.opencodeMonthlyLimit,
     pricingSnapshot: { ...config.pricingSnapshot },
     tuiSidebarPanel: { ...config.tuiSidebarPanel },
     tuiCompactStatus: { ...config.tuiCompactStatus },
+    tuiPromptBar: { ...config.tuiPromptBar },
     maintainerAnnouncements: { ...config.maintainerAnnouncements },
     layout: { ...config.layout },
     export: { ...config.export },
     telemetry: { ...config.telemetry },
   };
+}
+
+const QUOTA_RESET_WINDOWS: readonly QuotaResetWindow[] = [
+  "fiveHour",
+  "hourly",
+  "daily",
+  "weekly",
+  "monthly",
+  "yearly",
+];
+
+function extractQuotaResetNotificationsPatch(
+  value: unknown,
+  reportIssue?: (key: string, message: string) => void,
+): QuotaResetNotificationsPatch | undefined {
+  if (!isPlainObject(value)) return undefined;
+
+  const patch: QuotaResetNotificationsPatch = {};
+  if (hasOwnKey(value, "enabled")) {
+    if (typeof value.enabled === "boolean") patch.enabled = value.enabled;
+    else reportIssue?.("resetNotifications.enabled", "expected boolean");
+  }
+
+  if (hasOwnKey(value, "windows")) {
+    if (
+      Array.isArray(value.windows) &&
+      value.windows.length > 0 &&
+      value.windows.every((window): window is QuotaResetWindow =>
+        QUOTA_RESET_WINDOWS.includes(window as QuotaResetWindow),
+      )
+    ) {
+      patch.windows = dedupe(value.windows);
+    } else {
+      reportIssue?.(
+        "resetNotifications.windows",
+        `expected a non-empty array of: ${QUOTA_RESET_WINDOWS.join(", ")}`,
+      );
+    }
+  }
+
+  return Object.keys(patch).length > 0 ? patch : undefined;
 }
 
 type NormalizedEnabledProviders = {
@@ -387,15 +454,6 @@ function normalizeEnabledProviders(value: unknown): NormalizedEnabledProviders {
   };
 }
 
-function normalizeGoogleModels(value: unknown): GoogleModelId[] | undefined {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-
-  const models = value.filter(isValidGoogleModelId);
-  return models.length > 0 ? models : undefined;
-}
-
 function extractPricingSnapshotPatch(value: unknown): PricingSnapshotPatch | undefined {
   if (!isPlainObject(value)) {
     return undefined;
@@ -430,6 +488,13 @@ function extractTuiSidebarPanelPatch(value: unknown): TuiSidebarPanelPatch | und
     patch.formatStyle = sidebarFormatStyle;
   }
 
+  if (
+    hasOwnKey(value, "opencodeGoPreferredWindow") &&
+    isValidOpenCodeGoWindow(value.opencodeGoPreferredWindow)
+  ) {
+    patch.opencodeGoPreferredWindow = value.opencodeGoPreferredWindow;
+  }
+
   return Object.keys(patch).length > 0 ? patch : undefined;
 }
 
@@ -452,13 +517,6 @@ function extractTuiCompactStatusPatch(value: unknown): TuiCompactStatusPatch | u
     patch.sessionPrompt = value.sessionPrompt;
   }
 
-  if (
-    hasOwnKey(value, "suppressWhenNativeProviderQuota") &&
-    typeof value.suppressWhenNativeProviderQuota === "boolean"
-  ) {
-    patch.suppressWhenNativeProviderQuota = value.suppressWhenNativeProviderQuota;
-  }
-
   if (hasOwnKey(value, "maxWidth") && isPositiveNumber(value.maxWidth)) {
     patch.maxWidth = value.maxWidth;
   }
@@ -466,6 +524,20 @@ function extractTuiCompactStatusPatch(value: unknown): TuiCompactStatusPatch | u
   const compactFormatStyle = getExplicitFormatStyle(value);
   if (compactFormatStyle) {
     patch.formatStyle = compactFormatStyle;
+  }
+
+  return Object.keys(patch).length > 0 ? patch : undefined;
+}
+
+function extractTuiPromptBarPatch(value: unknown): TuiPromptBarPatch | undefined {
+  if (!isPlainObject(value)) {
+    return undefined;
+  }
+
+  const patch: TuiPromptBarPatch = {};
+
+  if (hasOwnKey(value, "enabled") && typeof value.enabled === "boolean") {
+    patch.enabled = value.enabled;
   }
 
   return Object.keys(patch).length > 0 ? patch : undefined;
@@ -486,6 +558,13 @@ function extractMaintainerAnnouncementsPatch(
 
   if (hasOwnKey(value, "home") && typeof value.home === "boolean") {
     patch.home = value.home;
+  }
+
+  if (
+    hasOwnKey(value, "homeFrequency") &&
+    (value.homeFrequency === "daily" || value.homeFrequency === "always")
+  ) {
+    patch.homeFrequency = value.homeFrequency;
   }
 
   return Object.keys(patch).length > 0 ? patch : undefined;
@@ -562,6 +641,14 @@ function extractValidatedQuotaToastPatch(
     patch.enableToast = quotaToastConfig.enableToast;
   }
 
+  if (hasOwnKey(quotaToastConfig, "resetNotifications")) {
+    const resetNotifications = extractQuotaResetNotificationsPatch(
+      quotaToastConfig.resetNotifications,
+      reportIssue,
+    );
+    if (resetNotifications) patch.resetNotifications = resetNotifications;
+  }
+
   if (hasOwnKey(quotaToastConfig, "tuiCommandDisplay")) {
     if (isValidTuiCommandDisplay(quotaToastConfig.tuiCommandDisplay)) {
       patch.tuiCommandDisplay = quotaToastConfig.tuiCommandDisplay;
@@ -582,11 +669,41 @@ function extractValidatedQuotaToastPatch(
     patch.percentDisplayMode = quotaToastConfig.percentDisplayMode;
   }
 
+  if (hasOwnKey(quotaToastConfig, "quotaProjection")) {
+    if (quotaToastConfig.quotaProjection === "runway") {
+      patch.quotaProjection = "runway";
+    } else {
+      reportIssue?.("quotaProjection", 'expected "runway"');
+    }
+  }
+
+  if (
+    hasOwnKey(quotaToastConfig, "percentLabelStyle") &&
+    isValidPercentLabelStyle(quotaToastConfig.percentLabelStyle)
+  ) {
+    patch.percentLabelStyle = quotaToastConfig.percentLabelStyle;
+  }
+
+  if (hasOwnKey(quotaToastConfig, "accountingDetail")) {
+    if (isValidAccountingDetail(quotaToastConfig.accountingDetail)) {
+      patch.accountingDetail = quotaToastConfig.accountingDetail;
+    } else {
+      reportIssue?.("accountingDetail", 'expected "summary" or "detailed"');
+    }
+  }
+
   if (
     hasOwnKey(quotaToastConfig, "resetTimeDecimals") &&
     isResetTimeDecimals(quotaToastConfig.resetTimeDecimals)
   ) {
     patch.resetTimeDecimals = quotaToastConfig.resetTimeDecimals;
+  }
+
+  if (
+    hasOwnKey(quotaToastConfig, "resetTimeSpaced") &&
+    typeof quotaToastConfig.resetTimeSpaced === "boolean"
+  ) {
+    patch.resetTimeSpaced = quotaToastConfig.resetTimeSpaced;
   }
 
   if (
@@ -627,13 +744,6 @@ function extractValidatedQuotaToastPatch(
     }
   }
 
-  if (hasOwnKey(quotaToastConfig, "googleModels")) {
-    const googleModels = normalizeGoogleModels(quotaToastConfig.googleModels);
-    if (googleModels !== undefined) {
-      patch.googleModels = googleModels;
-    }
-  }
-
   if (
     hasOwnKey(quotaToastConfig, "cursorPlan") &&
     isValidCursorQuotaPlan(quotaToastConfig.cursorPlan)
@@ -667,6 +777,13 @@ function extractValidatedQuotaToastPatch(
     isPositiveNumber(quotaToastConfig.opencodeMonthlyLimit)
   ) {
     patch.opencodeMonthlyLimit = quotaToastConfig.opencodeMonthlyLimit;
+  }
+
+  if (hasOwnKey(quotaToastConfig, "opencodeZenDisplay")) {
+    reportIssue?.(
+      "opencodeZenDisplay",
+      'removed; use root "accountingDetail" ("summary" or "detailed")',
+    );
   }
 
   if (hasOwnKey(quotaToastConfig, "pricingSnapshot")) {
@@ -719,6 +836,13 @@ function extractValidatedQuotaToastPatch(
   }
 
   if (
+    hasOwnKey(quotaToastConfig, "waitForQuotaReset") &&
+    typeof quotaToastConfig.waitForQuotaReset === "boolean"
+  ) {
+    patch.waitForQuotaReset = quotaToastConfig.waitForQuotaReset;
+  }
+
+  if (
     hasOwnKey(quotaToastConfig, "showSessionTokens") &&
     typeof quotaToastConfig.showSessionTokens === "boolean"
   ) {
@@ -744,6 +868,13 @@ function extractValidatedQuotaToastPatch(
     const tuiCompactStatus = extractTuiCompactStatusPatch(quotaToastConfig.tuiCompactStatus);
     if (tuiCompactStatus) {
       patch.tuiCompactStatus = tuiCompactStatus;
+    }
+  }
+
+  if (hasOwnKey(quotaToastConfig, "tuiPromptBar")) {
+    const tuiPromptBar = extractTuiPromptBarPatch(quotaToastConfig.tuiPromptBar);
+    if (tuiPromptBar) {
+      patch.tuiPromptBar = tuiPromptBar;
     }
   }
 
@@ -804,6 +935,17 @@ function applyValidatedQuotaToastPatch(
     applySettingSource(settingSources, "enableToast", sourcePath);
   }
 
+  if (patch.resetNotifications) {
+    if (hasOwnKey(patch.resetNotifications, "enabled")) {
+      config.resetNotifications.enabled = patch.resetNotifications.enabled!;
+      applySettingSource(settingSources, "resetNotifications.enabled", sourcePath);
+    }
+    if (hasOwnKey(patch.resetNotifications, "windows")) {
+      config.resetNotifications.windows = [...patch.resetNotifications.windows!];
+      applySettingSource(settingSources, "resetNotifications.windows", sourcePath);
+    }
+  }
+
   if (hasOwnKey(patch, "tuiCommandDisplay")) {
     config.tuiCommandDisplay = patch.tuiCommandDisplay!;
     applySettingSource(settingSources, "tuiCommandDisplay", sourcePath);
@@ -819,9 +961,29 @@ function applyValidatedQuotaToastPatch(
     applySettingSource(settingSources, "percentDisplayMode", sourcePath);
   }
 
+  if (hasOwnKey(patch, "quotaProjection")) {
+    config.quotaProjection = patch.quotaProjection;
+    applySettingSource(settingSources, "quotaProjection", sourcePath);
+  }
+
+  if (hasOwnKey(patch, "percentLabelStyle")) {
+    config.percentLabelStyle = patch.percentLabelStyle;
+    applySettingSource(settingSources, "percentLabelStyle", sourcePath);
+  }
+
+  if (hasOwnKey(patch, "accountingDetail")) {
+    config.accountingDetail = patch.accountingDetail!;
+    applySettingSource(settingSources, "accountingDetail", sourcePath);
+  }
+
   if (hasOwnKey(patch, "resetTimeDecimals")) {
     config.resetTimeDecimals = patch.resetTimeDecimals;
     applySettingSource(settingSources, "resetTimeDecimals", sourcePath);
+  }
+
+  if (hasOwnKey(patch, "resetTimeSpaced")) {
+    config.resetTimeSpaced = patch.resetTimeSpaced;
+    applySettingSource(settingSources, "resetTimeSpaced", sourcePath);
   }
 
   if (hasOwnKey(patch, "minIntervalMs")) {
@@ -850,11 +1012,6 @@ function applyValidatedQuotaToastPatch(
   if (hasOwnKey(patch, "anthropicBinaryPath")) {
     config.anthropicBinaryPath = patch.anthropicBinaryPath!;
     applySettingSource(settingSources, "anthropicBinaryPath", sourcePath);
-  }
-
-  if (hasOwnKey(patch, "googleModels")) {
-    config.googleModels = [...patch.googleModels!];
-    applySettingSource(settingSources, "googleModels", sourcePath);
   }
 
   if (hasOwnKey(patch, "cursorPlan")) {
@@ -924,6 +1081,11 @@ function applyValidatedQuotaToastPatch(
     applySettingSource(settingSources, "onlyCurrentModel", sourcePath);
   }
 
+  if (hasOwnKey(patch, "waitForQuotaReset")) {
+    config.waitForQuotaReset = patch.waitForQuotaReset!;
+    applySettingSource(settingSources, "waitForQuotaReset", sourcePath);
+  }
+
   if (hasOwnKey(patch, "showSessionTokens")) {
     config.showSessionTokens = patch.showSessionTokens!;
     applySettingSource(settingSources, "showSessionTokens", sourcePath);
@@ -944,6 +1106,11 @@ function applyValidatedQuotaToastPatch(
       config.tuiSidebarPanel.formatStyle = patch.tuiSidebarPanel.formatStyle!;
       applySettingSource(settingSources, "tuiSidebarPanel.formatStyle", sourcePath);
     }
+    if (hasOwnKey(patch.tuiSidebarPanel, "opencodeGoPreferredWindow")) {
+      config.tuiSidebarPanel.opencodeGoPreferredWindow =
+        patch.tuiSidebarPanel.opencodeGoPreferredWindow!;
+      applySettingSource(settingSources, "tuiSidebarPanel.opencodeGoPreferredWindow", sourcePath);
+    }
   }
 
   if (patch.tuiCompactStatus) {
@@ -962,16 +1129,6 @@ function applyValidatedQuotaToastPatch(
       applySettingSource(settingSources, "tuiCompactStatus.sessionPrompt", sourcePath);
     }
 
-    if (hasOwnKey(patch.tuiCompactStatus, "suppressWhenNativeProviderQuota")) {
-      config.tuiCompactStatus.suppressWhenNativeProviderQuota =
-        patch.tuiCompactStatus.suppressWhenNativeProviderQuota!;
-      applySettingSource(
-        settingSources,
-        "tuiCompactStatus.suppressWhenNativeProviderQuota",
-        sourcePath,
-      );
-    }
-
     if (hasOwnKey(patch.tuiCompactStatus, "maxWidth")) {
       config.tuiCompactStatus.maxWidth = patch.tuiCompactStatus.maxWidth!;
       applySettingSource(settingSources, "tuiCompactStatus.maxWidth", sourcePath);
@@ -980,6 +1137,13 @@ function applyValidatedQuotaToastPatch(
     if (hasOwnKey(patch.tuiCompactStatus, "formatStyle")) {
       config.tuiCompactStatus.formatStyle = patch.tuiCompactStatus.formatStyle!;
       applySettingSource(settingSources, "tuiCompactStatus.formatStyle", sourcePath);
+    }
+  }
+
+  if (patch.tuiPromptBar) {
+    if (hasOwnKey(patch.tuiPromptBar, "enabled")) {
+      config.tuiPromptBar.enabled = patch.tuiPromptBar.enabled!;
+      applySettingSource(settingSources, "tuiPromptBar.enabled", sourcePath);
     }
   }
 
@@ -992,6 +1156,11 @@ function applyValidatedQuotaToastPatch(
     if (hasOwnKey(patch.maintainerAnnouncements, "home")) {
       config.maintainerAnnouncements.home = patch.maintainerAnnouncements.home!;
       applySettingSource(settingSources, "maintainerAnnouncements.home", sourcePath);
+    }
+
+    if (hasOwnKey(patch.maintainerAnnouncements, "homeFrequency")) {
+      config.maintainerAnnouncements.homeFrequency = patch.maintainerAnnouncements.homeFrequency!;
+      applySettingSource(settingSources, "maintainerAnnouncements.homeFrequency", sourcePath);
     }
   }
 
@@ -1068,14 +1237,12 @@ function buildConfigLayerCandidatesForRoot(
   ];
 }
 
-function buildConfigLayerCandidates(
-  configDirs: string[],
+export function buildConfigLayerCandidates(
+  globalConfigDir: string,
   configRootDir: string,
 ): ConfigLayerCandidate[] {
   const workspaceCandidates = buildConfigLayerCandidatesForRoot(configRootDir, "workspace");
-  const globalCandidates = configDirs.flatMap((dir) =>
-    buildConfigLayerCandidatesForRoot(dir, "global"),
-  );
+  const globalCandidates = buildConfigLayerCandidatesForRoot(globalConfigDir, "global");
   const globalPaths = new Set(globalCandidates.map((candidate) => candidate.path));
 
   return [
@@ -1130,9 +1297,8 @@ export async function loadConfig(
     networkSettingSources: Record<string, string>;
     configIssues: LoadConfigIssue[];
   }> {
-    const configRootDir =
-      options?.configRootDir ?? getEffectiveConfigRoot(options?.cwd ?? process.cwd());
-    const { configDirs } = getOpencodeRuntimeDirCandidates();
+    const configRootDir = options?.configRootDir ?? options?.cwd ?? process.cwd();
+    const { configDir } = getOpencodeRuntimeDirs();
     const config = cloneDefaultConfig();
     const usedPaths: string[] = [];
     const globalConfigPaths: string[] = [];
@@ -1141,7 +1307,7 @@ export async function loadConfig(
     const configIssues: LoadConfigIssue[] = [];
     const authoritativeSidecarRoots = new Set<string>();
 
-    for (const candidate of buildConfigLayerCandidates(configDirs, configRootDir)) {
+    for (const candidate of buildConfigLayerCandidates(configDir, configRootDir)) {
       const rootKey = `${candidate.scope}:${candidate.rootDir}`;
       if (candidate.kind === "legacy" && authoritativeSidecarRoots.has(rootKey)) {
         continue;

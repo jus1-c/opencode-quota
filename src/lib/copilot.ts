@@ -11,7 +11,8 @@ import { join } from "path";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import { fetchWithTimeout } from "./http.js";
 import { readAuthFile } from "./opencode-auth.js";
-import { getOpencodeRuntimeDirCandidates } from "./opencode-runtime-paths.js";
+import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
+import { deriveResolvedAuthIdentity, type ResolvedAuthIdentity } from "./resolved-auth-identity.js";
 import type {
   AuthData,
   CopilotAuthData,
@@ -33,7 +34,15 @@ const COPILOT_QUOTA_CONFIG_FILENAME = "copilot-quota-token.json";
 const USER_AGENT = "opencode-quota/copilot-billing";
 const COPILOT_INTERNAL_USER_PATH = "/copilot_internal/user";
 
-type CopilotAuthKeyName = "github-copilot" | "copilot" | "copilot-chat" | "github-copilot-chat";
+/** Integration ids that can hold the Copilot OAuth login, in precedence order. */
+export const COPILOT_AUTH_KEYS = [
+  "github-copilot",
+  "copilot",
+  "copilot-chat",
+  "github-copilot-chat",
+] as const;
+
+type CopilotAuthKeyName = (typeof COPILOT_AUTH_KEYS)[number];
 type CopilotPatTokenKind = "github_pat" | "ghp" | "ghu" | "ghs" | "other";
 type EffectiveCopilotAuthSource = "pat" | "oauth" | "none";
 type CopilotQuotaApi =
@@ -183,6 +192,7 @@ interface CopilotInternalQuotaSnapshot {
   remaining?: number;
   quota_remaining?: number;
   percent_remaining?: number;
+  credits_used?: number;
   unlimited?: boolean;
 }
 
@@ -208,20 +218,6 @@ const LEGACY_PREMIUM_REQUEST_TOTALS: Partial<Record<CopilotTier, number>> = {
   pro: 300,
   "pro+": 1500,
 };
-
-function dedupeStrings(values: Array<string | undefined | null>): string[] {
-  const out: string[] = [];
-  const seen = new Set<string>();
-
-  for (const value of values) {
-    const trimmed = value?.trim();
-    if (!trimmed || seen.has(trimmed)) continue;
-    seen.add(trimmed);
-    out.push(trimmed);
-  }
-
-  return out;
-}
 
 function validateEnterpriseHost(value: unknown): { host?: string; error?: string } {
   if (value === undefined || value === null) return {};
@@ -430,10 +426,7 @@ function validatePatTargetCompatibility(
 }
 
 export function getCopilotPatConfigCandidatePaths(): string[] {
-  const { configDirs } = getOpencodeRuntimeDirCandidates();
-  return dedupeStrings(
-    configDirs.map((configDir) => join(configDir, COPILOT_QUOTA_CONFIG_FILENAME)),
-  );
+  return [join(getOpencodeRuntimeDirs().configDir, COPILOT_QUOTA_CONFIG_FILENAME)];
 }
 
 function validateQuotaConfig(raw: unknown): { config: CopilotQuotaConfig | null; error?: string } {
@@ -565,7 +558,8 @@ function selectCopilotAuth(authData: AuthData | null): {
 
   for (const [keyName, auth] of candidates) {
     if (!auth || auth.type !== "oauth") continue;
-    if (!getCopilotOAuthToken(auth)) continue;
+    // A login OpenCode could not return still counts, so it shows as an error.
+    if (!getCopilotOAuthToken(auth) && auth.resolveError === undefined) continue;
     return { auth, keyName };
   }
 
@@ -1244,8 +1238,9 @@ function parseCopilotInternalUser(
     reportedPercentRemaining !== undefined &&
     reportedPercentRemaining >= 0 &&
     reportedPercentRemaining <= 100;
+  const tokenBasedBilling = response.token_based_billing === true;
   const isPlaceholder =
-    response.token_based_billing === true &&
+    tokenBasedBilling &&
     (!snapshot ||
       (snapshot.unlimited !== true &&
         entitlement === 0 &&
@@ -1292,6 +1287,30 @@ function parseCopilotInternalUser(
         : !hasPercentRemaining
           ? Math.min(100, Math.max(0, (remaining / entitlement) * 100))
           : undefined,
+      plan,
+      resetTimeIso,
+    };
+  }
+  // Token-based billing reports a negative remaining once usage goes over the
+  // entitlement, alongside a provider-reported clamp in [0, 100].
+  const creditsUsed = readFiniteNumber(snapshot?.credits_used);
+  const hasValidCreditsUsed = creditsUsed !== undefined && creditsUsed >= 0;
+  if (
+    tokenBasedBilling &&
+    entitlement !== undefined &&
+    entitlement > 0 &&
+    remaining !== undefined &&
+    remaining < 0 &&
+    hasReportedPercent
+  ) {
+    return {
+      success: true,
+      mode: "user_quota",
+      unit: hasValidCreditsUsed ? "ai_credits" : "premium_interactions",
+      used: hasValidCreditsUsed ? creditsUsed : entitlement - remaining,
+      authority: hasValidCreditsUsed ? "provider_reported" : "locally_derived",
+      total: entitlement,
+      percentRemaining: reportedPercentRemaining,
       plan,
       resetTimeIso,
     };
@@ -1343,7 +1362,7 @@ async function fetchCopilotInternalUser(params: {
  * OpenCode-managed Copilot OAuth token can query the per-user internal quota endpoint.
  */
 export async function queryCopilotQuota(
-  options: { requestTimeoutMs?: number } = {},
+  options: { requestTimeoutMs?: number; authData?: AuthData } = {},
 ): Promise<CopilotResult> {
   const pat = readQuotaConfigWithMeta();
 
@@ -1353,7 +1372,14 @@ export async function queryCopilotQuota(
     );
   }
   if (pat.state === "absent" || !pat.config) {
-    const { auth } = selectCopilotAuth(await readAuthFile());
+    const { auth } = selectCopilotAuth(
+      options.authData ?? (await readAuthFile({ integrationIds: COPILOT_AUTH_KEYS })),
+    );
+    if (auth?.resolveError !== undefined) {
+      return toQuotaError(
+        `Copilot sign-in could not be read: ${auth.resolveError}. Run \`opencode auth login github-copilot\`.`,
+      );
+    }
     const token = getCopilotOAuthToken(auth);
     if (!auth || !token) return null;
 
@@ -1405,8 +1431,49 @@ export async function queryCopilotQuota(
   }
 }
 
+export async function resolveCopilotAuthIdentity(): Promise<ResolvedAuthIdentity | null> {
+  const pat = readQuotaConfigWithMeta();
+  if (pat.state === "invalid") return null;
+
+  if (pat.state === "valid" && pat.config) {
+    const resolved = resolvePatBillingTarget(pat.config);
+    if (!resolved.target || validatePatTargetCompatibility(resolved.target, pat.tokenKind)) {
+      return null;
+    }
+
+    return deriveResolvedAuthIdentity({
+      providerId: "copilot:pat",
+      principal: { kind: "credential", value: pat.config.token },
+      qualifiers: [
+        `api=${getApiBaseUrl(pat.config.enterpriseUrl)}`,
+        `billingModel=${pat.config.billingModel ?? "ai_credits"}`,
+        `tier=${pat.config.tier}`,
+        `scope=${resolved.target.scope}`,
+        `username=${resolved.target.username ?? ""}`,
+        `organization=${"organization" in resolved.target ? resolved.target.organization : ""}`,
+        `enterprise=${"enterprise" in resolved.target ? resolved.target.enterprise : ""}`,
+        `period=${formatBillingPeriod(resolved.target.billingPeriod)}`,
+      ],
+    });
+  }
+
+  const { auth } = selectCopilotAuth(await readAuthFile({ integrationIds: COPILOT_AUTH_KEYS }));
+  const token = getCopilotOAuthToken(auth);
+  if (!auth || !token) return null;
+
+  const enterpriseHost = validateEnterpriseHost(auth.enterpriseUrl);
+  if (enterpriseHost.error) return null;
+  return deriveResolvedAuthIdentity({
+    providerId: "copilot:oauth",
+    principal: { kind: "credential", value: token },
+    qualifiers: [`api=${getApiBaseUrl(enterpriseHost.host)}`],
+  });
+}
+
 export async function hasCopilotQuotaRuntimeAvailable(): Promise<boolean> {
-  const diagnostics = getCopilotQuotaAuthDiagnostics(await readAuthFile());
+  const diagnostics = getCopilotQuotaAuthDiagnostics(
+    await readAuthFile({ integrationIds: COPILOT_AUTH_KEYS }),
+  );
   return diagnostics.billingApiAccessLikely;
 }
 

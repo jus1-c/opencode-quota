@@ -3,19 +3,14 @@ import { describe, expect, it, vi } from "vitest";
 import {
   isAnyProviderIdAvailable,
   isCanonicalProviderAvailable,
-  isCanonicalProviderWithModelsAvailable,
 } from "../src/lib/provider-availability.js";
 import { createRuntimeProviderIdResolver } from "../src/lib/runtime-provider-ids.js";
 
-function makeCtx(params: {
-  ids?: string[];
-  providers?: Array<{ id: string; models?: Record<string, unknown> }>;
-  error?: Error;
-}) {
+function makeCtx(params: { ids?: string[]; error?: Error }) {
   const providers = params.error
     ? vi.fn().mockRejectedValue(params.error)
     : vi.fn().mockResolvedValue({
-        data: { providers: params.providers ?? (params.ids ?? []).map((id) => ({ id })) },
+        data: { providers: (params.ids ?? []).map((id) => ({ id })) },
       });
 
   const client = {
@@ -75,22 +70,36 @@ describe("provider availability", () => {
     ).resolves.toBe(true);
     await expect(
       isCanonicalProviderAvailable({
+        ctx: makeCtx({ ids: ["alibaba-coding-plan"] }),
+        providerId: "alibaba-coding-plan",
+        fallbackOnError: false,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      isCanonicalProviderAvailable({
+        ctx: makeCtx({ ids: ["alibaba"] }),
+        providerId: "alibaba-token-plan",
+        fallbackOnError: false,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      isCanonicalProviderAvailable({
+        ctx: makeCtx({ ids: ["alibaba-coding-plan"] }),
+        providerId: "alibaba-token-plan",
+        fallbackOnError: false,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      isCanonicalProviderAvailable({
+        ctx: makeCtx({ ids: ["alibaba-token-plan"] }),
+        providerId: "alibaba-token-plan",
+        fallbackOnError: false,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      isCanonicalProviderAvailable({
         ctx: makeCtx({ ids: ["synthetic"] }),
         providerId: "synthetic",
-        fallbackOnError: false,
-      }),
-    ).resolves.toBe(true);
-    await expect(
-      isCanonicalProviderAvailable({
-        ctx: makeCtx({ ids: ["llmgate"] }),
-        providerId: "llmgate",
-        fallbackOnError: false,
-      }),
-    ).resolves.toBe(true);
-    await expect(
-      isCanonicalProviderAvailable({
-        ctx: makeCtx({ ids: ["antigravity"] }),
-        providerId: "google-antigravity",
         fallbackOnError: false,
       }),
     ).resolves.toBe(true);
@@ -171,23 +180,6 @@ describe("provider availability", () => {
         fallbackOnError: false,
       }),
     ).resolves.toBe(false);
-  });
-
-  it("requires a configured model when the runtime exposes a model map", async () => {
-    await expect(
-      isCanonicalProviderWithModelsAvailable({
-        ctx: makeCtx({ providers: [{ id: "llmgate", models: {} }] }),
-        providerId: "llmgate",
-        fallbackOnError: false,
-      }),
-    ).resolves.toBe(false);
-    await expect(
-      isCanonicalProviderWithModelsAvailable({
-        ctx: makeCtx({ providers: [{ id: "llmgate", models: { "gpt-5.6": {} } }] }),
-        providerId: "llmgate",
-        fallbackOnError: false,
-      }),
-    ).resolves.toBe(true);
   });
 
   it("reuses one runtime-provider snapshot across concurrent availability checks", async () => {

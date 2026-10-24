@@ -6,10 +6,7 @@ import type {
   QuotaProviderResult,
   QuotaToastEntry,
 } from "../lib/entries.js";
-import {
-  hasLlmGateAuthTokens,
-  queryLlmGateQuota,
-} from "../lib/llmgate.js";
+import { hasLlmGateAuthTokens, queryLlmGateQuota } from "../lib/llmgate.js";
 import { isCanonicalProviderWithModelsAvailable } from "../lib/provider-availability.js";
 import { modelProviderMatchesRuntimeId } from "../lib/provider-model-matching.js";
 import { attemptedResult, mapNullableProviderResult } from "./result-helpers.js";
@@ -18,7 +15,9 @@ function numberDisplay(value: number): string {
   return Number(value.toFixed(2)).toLocaleString("en-US");
 }
 
-function buildEntries(result: Extract<NonNullable<Awaited<ReturnType<typeof queryLlmGateQuota>>>, { success: true }>): QuotaToastEntry[] {
+function buildEntries(
+  result: Extract<NonNullable<Awaited<ReturnType<typeof queryLlmGateQuota>>>, { success: true }>,
+): QuotaToastEntry[] {
   const label = result.planName ? `LLMGate ${result.planName}` : "LLMGate";
   const entries: QuotaToastEntry[] = [];
   if (result.windows.fiveHour) {
@@ -78,10 +77,11 @@ export const llmGateProvider: QuotaProvider = {
     const result = await queryLlmGateQuota({ requestTimeoutMs: ctx.config?.requestTimeoutMs });
     return mapNullableProviderResult(result, {
       errorLabel: "LLMGate",
-      onSuccess: (success) => attemptedResult(buildEntries(success), [], {
-        singleWindowDisplayName: success.planName ? `LLMGate ${success.planName}` : "LLMGate",
-        singleWindowShowRight: true,
-      }),
+      onSuccess: (success) =>
+        attemptedResult(buildEntries(success), [], {
+          singleWindowDisplayName: success.planName ? `LLMGate ${success.planName}` : "LLMGate",
+          singleWindowShowRight: true,
+        }),
     });
   },
 };

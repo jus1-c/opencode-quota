@@ -129,7 +129,24 @@ jobs:
           name: release-package
           path: package-artifacts
 
+      - name: Choose npm dist-tag
+        id: dist-tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          if [ "$RELEASE_PRERELEASE" = "true" ] || [[ "$VERSION" == *-* ]]; then
+            DIST_TAG="next"
+          else
+            DIST_TAG="latest"
+          fi
+          echo "Publishing $VERSION to the npm '$DIST_TAG' dist-tag"
+          echo "dist-tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
+
       - name: Verify and publish exact release artifact
+        env:
+          DIST_TAG: ${{ steps.dist-tag.outputs.dist-tag }}
         run: |
           node scripts/verify-release-artifact.mjs package-artifacts
           TARBALLS=(package-artifacts/*.tgz)
@@ -137,7 +154,41 @@ jobs:
             echo "Expected exactly one release tarball." >&2
             exit 1
           fi
-          npm publish "./${TARBALLS[0]}" --access public --provenance --ignore-scripts
+          npm publish "./${TARBALLS[0]}" --tag "$DIST_TAG" --access public --provenance --ignore-scripts
+
+  point-next-at-stable:
+    # A stable release becomes `next` too, so `@next` never stays on an older beta. It leaves
+    # `next` alone when it already points at something newer, such as a beta of the next version.
+    # Needs "Allow npm dist-tag" on this workflow's trusted publisher on npmjs.com.
+    runs-on: ubuntu-latest
+    needs: publish
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name, '-') }}
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Setup Node.js 24 for npm
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+
+      - name: Point next at the new stable version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PACKAGE: "@slkiser/opencode-quota"
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          NEXT="$(npm view "$PACKAGE" dist-tags.next)"
+          # Fetch the semver tool first: a failed download must stop here, not read as "not newer".
+          npx --yes semver@7 0.0.0 >/dev/null
+          if [ -n "$NEXT" ] && npx --yes semver@7 --include-prerelease --range ">$VERSION" "$NEXT" >/dev/null; then
+            echo "next is $NEXT, newer than $VERSION; leaving it."
+            exit 0
+          fi
+          # npm 11.21.0 is the first npm 11 that can change dist-tags with trusted publishing.
+          npx --yes npm@^11.21.0 dist-tag add "$PACKAGE@$VERSION" next
 
   backfill-version:
     runs-on: ubuntu-latest
@@ -193,6 +244,12 @@ jobs:
           if ! git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
             echo "Target '$BRANCH' is not a remote branch; falling back to '$DEFAULT_BRANCH'."
             BRANCH="$DEFAULT_BRANCH"
+          fi
+
+          git fetch origin "$BRANCH"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$BRANCH"; then
+            echo "Release commit $GITHUB_SHA is not on branch '$BRANCH'; refusing to commit the version there." >&2
+            exit 1
           fi
 
           echo "Committing synced package version to branch '$BRANCH'"

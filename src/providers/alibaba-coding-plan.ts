@@ -4,6 +4,12 @@ import {
   isAlibabaModelId,
   resolveAlibabaCodingPlanAuthCached,
 } from "../lib/alibaba-auth.js";
+import {
+  ALIBABA_CODING_PLAN_STATE_VERSION,
+  computeAlibabaCodingPlanQuota,
+  getAlibabaCodingPlanQuotaPath,
+  readAlibabaCodingPlanQuotaState,
+} from "../lib/alibaba-coding-plan-local-quota.js";
 import type {
   QuotaProvider,
   QuotaProviderContext,
@@ -11,12 +17,6 @@ import type {
   QuotaToastEntry,
 } from "../lib/entries.js";
 import { findQuotaProviderDefinition } from "../lib/quota-providers.js";
-import {
-  ALIBABA_CODING_PLAN_STATE_VERSION,
-  computeAlibabaCodingPlanQuota,
-  getAlibabaCodingPlanQuotaPath,
-  readAlibabaCodingPlanQuotaState,
-} from "../lib/qwen-local-quota.js";
 import {
   attemptedErrorResult,
   attemptedResult,
@@ -66,7 +66,8 @@ export const alibabaCodingPlanProvider: QuotaProvider = {
       "alibaba auth configured": diagnostics.state === "none" ? "false" : "true",
       alibaba_api_key_source: diagnostics.source ?? "(none)",
       alibaba_api_key_checked_paths: diagnostics.checkedPaths.join(" | ") || "(none)",
-      alibaba_api_key_auth_paths: diagnostics.authPaths.join(" | ") || "(none)",
+      alibaba_api_key_credential_database_paths:
+        diagnostics.credentialDatabasePaths.join(" | ") || "(none)",
       alibaba_coding_plan:
         diagnostics.state === "configured"
           ? diagnostics.tier

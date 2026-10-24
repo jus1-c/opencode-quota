@@ -35,7 +35,7 @@ describe("ollama-cloud provider", () => {
       configured: true,
       source: "env:OLLAMA_API_KEY",
       checkedPaths: ["env:OLLAMA_API_KEY"],
-      authPaths: ["/tmp/auth.json"],
+      credentialDatabasePaths: ["/tmp/opencode.db"],
     });
   });
 
@@ -48,23 +48,12 @@ describe("ollama-cloud provider", () => {
     expect(out.statusDetails).toContainEqual({ key: "api_key_configured", value: "true" });
   });
 
-  it("maps session, weekly, and sorted model request entries", async () => {
+  it("maps legacy session and weekly limits with reset times", async () => {
     mocks.queryOllamaCloudQuota.mockResolvedValueOnce({
       success: true,
-      session: {
-        usageFraction: 0.25,
-        usagePercent: 25,
-        percentRemaining: 75,
-      },
-      weekly: {
-        usageFraction: 0.4,
-        usagePercent: 40,
-        percentRemaining: 60,
-      },
-      models: [
-        { model: "deepseek-v3.1:671b", requests: 1 },
-        { model: "qwen3-coder:480b", requests: 12 },
-      ],
+      session: { percentRemaining: 75, resetTimeIso: "2026-10-01T07:00:00.000Z" },
+      weekly: { percentRemaining: 40, resetTimeIso: "2026-10-05T00:00:00.000Z" },
+      purchasedUsd: 0,
     });
 
     const out = await runProviderFetch();
@@ -76,28 +65,14 @@ describe("ollama-cloud provider", () => {
         group: "Ollama Cloud",
         label: "Session:",
         percentRemaining: 75,
+        resetTimeIso: "2026-10-01T07:00:00.000Z",
       },
       {
         name: "Ollama Cloud Weekly",
         group: "Ollama Cloud",
         label: "Weekly:",
-        percentRemaining: 60,
-      },
-      {
-        kind: "value",
-        name: "Ollama Cloud deepseek-v3.1:671b",
-        group: "Ollama Cloud",
-        label: "deepseek-v3.1:671b:",
-        metricLabel: "deepseek-v3.1:671b",
-        value: "1 request",
-      },
-      {
-        kind: "value",
-        name: "Ollama Cloud qwen3-coder:480b",
-        group: "Ollama Cloud",
-        label: "qwen3-coder:480b:",
-        metricLabel: "qwen3-coder:480b",
-        value: "12 requests",
+        percentRemaining: 40,
+        resetTimeIso: "2026-10-05T00:00:00.000Z",
       },
     ]);
     expect(out.entries.map((entry) => entry.accounting)).toEqual([
@@ -113,58 +88,135 @@ describe("ollama-cloud provider", () => {
         ownership: "maintained",
         authority: "provider_reported",
       },
-      {
-        resultType: "usage",
-        acquisitionMethod: "remote_api",
-        ownership: "maintained",
-        authority: "provider_reported",
-      },
-      {
-        resultType: "usage",
-        acquisitionMethod: "remote_api",
-        ownership: "maintained",
-        authority: "provider_reported",
-      },
     ]);
     expect(out.statusDetails).toEqual(
       expect.arrayContaining([
         { key: "api_key_source", value: "env:OLLAMA_API_KEY" },
-        { key: "session_usage_fraction", value: "0.25" },
-        { key: "weekly_usage_fraction", value: "0.4" },
-        { key: "model_rows", value: "2" },
+        { key: "session_remaining_percent", value: "75" },
+        { key: "session_resets_at", value: "2026-10-01T07:00:00.000Z" },
+        { key: "weekly_remaining_percent", value: "40" },
+        { key: "weekly_resets_at", value: "2026-10-05T00:00:00.000Z" },
+        { key: "purchased_balance_usd", value: "0" },
       ]),
     );
+  });
+
+  it("maps included credits to a Monthly row and purchased credits to a value row", async () => {
+    mocks.queryOllamaCloudQuota.mockResolvedValueOnce({
+      success: true,
+      includedCredits: {
+        balanceUsd: 72.5,
+        allowanceUsd: 100,
+        percentRemaining: 72.5,
+        resetTimeIso: "2026-10-15T09:30:00.000Z",
+      },
+      purchasedUsd: 25,
+    });
+
+    const out = await runProviderFetch();
+
+    expectAttemptedWithNoErrors(out);
+    expect(visibleEntries(out.entries, "ollama-cloud")).toEqual([
+      {
+        name: "Ollama Cloud Monthly",
+        group: "Ollama Cloud",
+        label: "Monthly:",
+        percentRemaining: 72.5,
+        resetTimeIso: "2026-10-15T09:30:00.000Z",
+      },
+      {
+        kind: "value",
+        name: "Ollama Cloud Purchased",
+        group: "Ollama Cloud",
+        label: "Purchased:",
+        value: "$25.00 left",
+      },
+    ]);
+    expect(out.entries[1]?.accounting).toEqual({
+      resultType: "balance",
+      acquisitionMethod: "remote_api",
+      ownership: "maintained",
+      authority: "provider_reported",
+    });
+    expect(out.statusDetails).toEqual(
+      expect.arrayContaining([
+        { key: "included_balance_usd", value: "72.5" },
+        { key: "included_allowance_usd", value: "100" },
+        { key: "included_period_until", value: "2026-10-15T09:30:00.000Z" },
+        { key: "purchased_balance_usd", value: "25" },
+      ]),
+    );
+    expect(out.statusDetails?.map((detail) => detail.key)).not.toContain(
+      "session_remaining_percent",
+    );
+  });
+
+  it("hides a zero purchased balance next to other rows but shows it when it is the only data", async () => {
+    mocks.queryOllamaCloudQuota.mockResolvedValueOnce({
+      success: true,
+      includedCredits: { balanceUsd: 10, allowanceUsd: 20, percentRemaining: 50 },
+      purchasedUsd: 0,
+    });
+    const withIncluded = await runProviderFetch();
+    expect(withIncluded.entries.map((entry) => entry.name)).toEqual(["Ollama Cloud Monthly"]);
+
+    mocks.queryOllamaCloudQuota.mockResolvedValueOnce({
+      success: true,
+      includedCredits: { balanceUsd: 0, allowanceUsd: 0 },
+      purchasedUsd: 0,
+    });
+    const purchasedOnly = await runProviderFetch();
+    expectAttemptedWithNoErrors(purchasedOnly);
+    expect(visibleEntries(purchasedOnly.entries, "ollama-cloud")).toEqual([
+      {
+        kind: "value",
+        name: "Ollama Cloud Purchased",
+        group: "Ollama Cloud",
+        label: "Purchased:",
+        value: "$0.00 left",
+      },
+    ]);
+  });
+
+  it("reports no limits or balance when no row can be shown", async () => {
+    mocks.queryOllamaCloudQuota.mockResolvedValueOnce({
+      success: true,
+      includedCredits: { balanceUsd: 0, allowanceUsd: 0 },
+    });
+
+    const out = await runProviderFetch();
+
+    expect(out.attempted).toBe(true);
+    expect(out.entries).toEqual([]);
+    expect(out.errors).toEqual([
+      { label: "Ollama Cloud", message: "Ollama Cloud returned no limits or balance" },
+    ]);
   });
 
   it("keeps valid entries and exposes row-level response errors", async () => {
     mocks.queryOllamaCloudQuota.mockResolvedValueOnce({
       success: true,
-      session: {
-        usageFraction: 0.25,
-        usagePercent: 25,
-        percentRemaining: 75,
-      },
-      models: [],
-      rowErrors: ["Weekly: ignored invalid usage fraction"],
+      session: { percentRemaining: 75 },
+      rowErrors: ["Weekly: ignored invalid remaining percent"],
     });
 
     const out = await runProviderFetch();
 
     expect(out.attempted).toBe(true);
     expect(out.entries).toHaveLength(1);
+    expect(out.entries[0]).not.toHaveProperty("resetTimeIso");
     expect(out.errors[0]?.label).toBe("Ollama Cloud");
-    expect(out.errors[0]?.message).toBe("Weekly: ignored invalid usage fraction");
+    expect(out.errors[0]?.message).toBe("Weekly: ignored invalid remaining percent");
     expect(out.statusDetails).toContainEqual({
       key: "live_error_1",
-      value: "Weekly: ignored invalid usage fraction",
+      value: "Weekly: ignored invalid remaining percent",
     });
   });
 
   it("passes the effective request timeout", async () => {
     mocks.queryOllamaCloudQuota.mockResolvedValue({
       success: true,
-      weekly: { usageFraction: 0.1, usagePercent: 10, percentRemaining: 90 },
-      models: [],
+      weekly: { percentRemaining: 90 },
     });
 
     await runProviderFetch({ requestTimeoutMs: 1234, requestTimeoutMsConfigured: true });
@@ -177,7 +229,7 @@ describe("ollama-cloud provider", () => {
   it("returns API errors with the provider label", async () => {
     mocks.queryOllamaCloudQuota.mockResolvedValueOnce({
       success: false,
-      error: "Ollama Cloud usage API error 401: invalid credentials",
+      error: "Ollama Cloud balance API error 401: invalid credentials",
     });
 
     const out = await runProviderFetch();

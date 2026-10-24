@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
   const fetchResponse = vi.fn();
@@ -24,6 +27,13 @@ const mocks = vi.hoisted(() => {
     inspectGeminiCliCompanionPresence: vi.fn(),
     resolveGeminiCliClientCredentials: vi.fn(),
     clearGeminiCliCompanionCacheForTests: vi.fn(),
+    deriveResolvedAuthIdentity: vi.fn(
+      async (params: { providerId: string }) => `identity:${params.providerId}`,
+    ),
+    composeResolvedAuthIdentities: vi.fn(
+      async (params: { providerId: string; identities: readonly string[] }) =>
+        `composed:${params.providerId}:${params.identities.join("|")}`,
+    ),
   };
 });
 
@@ -47,12 +57,19 @@ vi.mock("../src/lib/google-gemini-cli-companion.js", () => ({
   clearGeminiCliCompanionCacheForTests: mocks.clearGeminiCliCompanionCacheForTests,
 }));
 
+vi.mock("../src/lib/resolved-auth-identity.js", () => ({
+  deriveResolvedAuthIdentity: mocks.deriveResolvedAuthIdentity,
+  composeResolvedAuthIdentities: mocks.composeResolvedAuthIdentities,
+}));
+
 import {
   DEFAULT_GEMINI_CLI_AUTH_CACHE_MAX_AGE_MS,
+  hasGeminiCliQuotaRuntimeAvailable,
   inspectGeminiCliAuthPresence,
   parseGeminiCliRefreshParts,
   queryGeminiCliQuota,
   resolveGeminiCliAccounts,
+  resolveGeminiCliAuthIdentity,
   resolveGeminiCliConfiguredProjectId,
 } from "../src/lib/google-gemini-cli.js";
 
@@ -65,7 +82,15 @@ function mockJsonResponse(data: unknown, status = 200) {
 }
 
 describe("gemini cli auth resolution", () => {
+  let configDir: string;
+
+  function writeGlobalConfig(config: unknown) {
+    writeFileSync(join(configDir, "opencode.json"), JSON.stringify(config));
+  }
+
   beforeEach(() => {
+    configDir = mkdtempSync(join(tmpdir(), "opencode-quota-gemini-config-"));
+    vi.stubEnv("OPENCODE_CONFIG_DIR", configDir);
     vi.clearAllMocks();
     mocks.readAuthFileCached.mockResolvedValue(null);
     mocks.fetchResponse.mockResolvedValue(mockJsonResponse({ buckets: [] }));
@@ -79,6 +104,37 @@ describe("gemini cli auth resolution", () => {
     delete process.env.OPENCODE_GEMINI_PROJECT_ID;
     delete process.env.GOOGLE_CLOUD_PROJECT;
     delete process.env.GOOGLE_CLOUD_PROJECT_ID;
+  });
+
+  afterEach(() => {
+    rmSync(configDir, { recursive: true, force: true });
+  });
+
+  it("composes ordered account and companion identities", async () => {
+    mocks.readAuthFileCached.mockResolvedValue({
+      "google-gemini-cli": {
+        type: "oauth",
+        refresh: "refresh-one|project-one|",
+      },
+      google: {
+        type: "oauth",
+        refresh: "refresh-two|project-two|",
+      },
+    });
+
+    const identity = await resolveGeminiCliAuthIdentity();
+
+    expect(mocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
+      providerId: "google-gemini-cli",
+      principal: { kind: "credential", value: "refresh-one" },
+      qualifiers: ["project-one"],
+    });
+    expect(mocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
+      providerId: "google-gemini-cli:companion",
+      principal: { kind: "credential", value: "client-secret" },
+      qualifiers: ["client-id"],
+    });
+    expect(identity).toContain("composed:google-gemini-cli:");
   });
 
   it("parses opencode-gemini-auth packed refresh strings", () => {
@@ -218,39 +274,40 @@ describe("gemini cli auth resolution", () => {
 
   it("prefers explicit OpenCode provider config over generic Google project env vars", async () => {
     process.env.GOOGLE_CLOUD_PROJECT = "generic-shell-project";
+    writeGlobalConfig({
+      provider: { google: { options: { projectId: "configured-opencode-project" } } },
+    });
 
-    await expect(
-      resolveGeminiCliConfiguredProjectId({
-        config: {
-          get: async () => ({
-            data: {
-              provider: {
-                google: { options: { projectId: "configured-opencode-project" } },
-              },
-            },
-          }),
-        },
-      }),
-    ).resolves.toBe("configured-opencode-project");
+    await expect(resolveGeminiCliConfiguredProjectId()).resolves.toBe(
+      "configured-opencode-project",
+    );
+  });
+
+  it("reads the project id from OpenCode 2 native provider settings", async () => {
+    writeGlobalConfig({
+      providers: { google: { settings: { projectId: "native-opencode-project" } } },
+    });
+
+    await expect(resolveGeminiCliConfiguredProjectId()).resolves.toBe("native-opencode-project");
+  });
+
+  it("lets a native providers entry replace the legacy provider entry", async () => {
+    writeGlobalConfig({
+      provider: { google: { options: { projectId: "legacy-opencode-project" } } },
+      providers: { google: { settings: { projectId: "native-opencode-project" } } },
+    });
+
+    await expect(resolveGeminiCliConfiguredProjectId()).resolves.toBe("native-opencode-project");
   });
 
   it("keeps OPENCODE_GEMINI_PROJECT_ID as the highest-priority project override", async () => {
     process.env.OPENCODE_GEMINI_PROJECT_ID = "explicit-gemini-project";
     process.env.GOOGLE_CLOUD_PROJECT = "generic-shell-project";
+    writeGlobalConfig({
+      providers: { google: { settings: { projectId: "native-opencode-project" } } },
+    });
 
-    await expect(
-      resolveGeminiCliConfiguredProjectId({
-        config: {
-          get: async () => ({
-            data: {
-              provider: {
-                google: { options: { projectId: "configured-opencode-project" } },
-              },
-            },
-          }),
-        },
-      }),
-    ).resolves.toBe("explicit-gemini-project");
+    await expect(resolveGeminiCliConfiguredProjectId()).resolves.toBe("explicit-gemini-project");
   });
 
   it("reports invalid auth when OAuth exists but no project id can be resolved", async () => {
@@ -266,6 +323,61 @@ describe("gemini cli auth resolution", () => {
     });
     expect(mocks.readAuthFileCached).toHaveBeenCalledWith({
       maxAgeMs: DEFAULT_GEMINI_CLI_AUTH_CACHE_MAX_AGE_MS,
+      integrationIds: [
+        "google-gemini-cli",
+        "gemini-cli",
+        "opencode-gemini-auth",
+        "gemini",
+        "google",
+      ],
+    });
+  });
+
+  it("keeps a login OpenCode could not return present without making it an account", async () => {
+    mocks.readAuthFileCached.mockResolvedValue({
+      "google-gemini-cli": { type: "oauth", resolveError: "refresh_failed: HTTP 400" },
+    });
+    mocks.inspectGeminiCliCompanionPresence.mockResolvedValue({
+      state: "present",
+      resolvedPath: "/plugin",
+    });
+
+    await expect(inspectGeminiCliAuthPresence()).resolves.toEqual({
+      state: "present",
+      sourceKey: "google-gemini-cli",
+      accountCount: 1,
+      validAccountCount: 0,
+    });
+    await expect(hasGeminiCliQuotaRuntimeAvailable()).resolves.toBe(true);
+    await expect(queryGeminiCliQuota()).resolves.toBeNull();
+    expect(mocks.fetchResponse).not.toHaveBeenCalled();
+  });
+
+  it("skips a failed login when resolving accounts and counts it next to valid ones", async () => {
+    const auth = {
+      "google-gemini-cli": { type: "oauth", resolveError: "refresh_failed: HTTP 400" },
+      google: { type: "oauth", refresh: "refresh-token|project-id" },
+    };
+    mocks.readAuthFileCached.mockResolvedValue(auth);
+
+    expect(resolveGeminiCliAccounts(auth).map((account) => account.sourceKey)).toEqual(["google"]);
+    await expect(inspectGeminiCliAuthPresence()).resolves.toEqual({
+      state: "present",
+      sourceKey: "google",
+      accountCount: 2,
+      validAccountCount: 1,
+    });
+  });
+
+  it("does not treat a failed Google API key login as a Gemini CLI login", async () => {
+    mocks.readAuthFileCached.mockResolvedValue({
+      google: { type: "api", resolveError: "resolve_empty: no value" },
+    });
+
+    await expect(inspectGeminiCliAuthPresence()).resolves.toEqual({
+      state: "missing",
+      accountCount: 0,
+      validAccountCount: 0,
     });
   });
 

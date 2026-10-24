@@ -1,8 +1,92 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildCompactQuotaStatusLine } from "../src/lib/tui-compact-format.js";
+import { TUI_SIDEBAR_MAX_WIDTH } from "../src/lib/tui-sidebar-format.js";
+import { DEFAULT_CONFIG } from "../src/lib/types.js";
 
 describe("buildCompactQuotaStatusLine", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("formats dense provider reset timestamps when explicitly requested", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-15T10:00:00.000Z"));
+
+    const line = buildCompactQuotaStatusLine({
+      resetTimeSpaced: false,
+      maxWidth: 96,
+      data: {
+        entries: [
+          {
+            name: "OpenAI Weekly",
+            percentRemaining: 50,
+            resetTimeIso: "2026-01-21T05:49:00.000Z",
+          },
+        ],
+        errors: [],
+      },
+    });
+
+    expect(line).toBe("OpenAI Weekly 50% 5d19h49m");
+  });
+
+  it("uses the resolved spacing default while keeping compact percentages bare", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-15T10:00:00.000Z"));
+
+    const line = buildCompactQuotaStatusLine({
+      percentDisplayMode: "used",
+      resetTimeSpaced: DEFAULT_CONFIG.resetTimeSpaced,
+      maxWidth: 96,
+      data: {
+        entries: [
+          {
+            name: "OpenAI Weekly",
+            percentRemaining: 81,
+            resetTimeIso: "2026-01-17T15:14:00.000Z",
+          },
+        ],
+        errors: [],
+      },
+    });
+
+    expect(line).toBe("OpenAI Weekly 19% 2d 5h 14m");
+  });
+
+  it("renders expired provider resets once", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-15T10:00:00.000Z"));
+
+    const line = buildCompactQuotaStatusLine({
+      maxWidth: 96,
+      data: {
+        entries: [
+          {
+            name: "OpenAI Weekly",
+            percentRemaining: 50,
+            resetTimeIso: "2026-01-15T09:59:00.000Z",
+          },
+        ],
+        errors: [],
+      },
+    });
+
+    expect(line).toBe("OpenAI Weekly 50% reset");
+  });
+
+  it("keeps compact entries without provider reset timestamps unchanged", () => {
+    const line = buildCompactQuotaStatusLine({
+      maxWidth: 96,
+      data: {
+        entries: [{ name: "OpenAI Weekly", percentRemaining: 50 }],
+        errors: [],
+      },
+    });
+
+    expect(line).toBe("OpenAI Weekly 50%");
+  });
+
   it("formats percent entries with text-only remaining percent semantics", () => {
     const line = buildCompactQuotaStatusLine({
       percentDisplayMode: "remaining",
@@ -43,19 +127,19 @@ describe("buildCompactQuotaStatusLine", () => {
     expect(line).toBe("Copilot 18%");
   });
 
-  it("keeps a lone Antigravity model label in all-window compact output", () => {
+  it("keeps a lone model label in all-window compact output", () => {
     const line = buildCompactQuotaStatusLine({
       data: {
         entries: [
           {
-            name: "Antigravity (ali…): Claude",
-            group: "[Antigravity (ali…)]",
+            name: "Example (ali…): Claude",
+            group: "[Example (ali…)]",
             label: "Claude:",
             percentRemaining: 64,
           },
           {
-            name: "Antigravity (bob…): Claude",
-            group: "[Antigravity (bob…)]",
+            name: "Example (bob…): Claude",
+            group: "[Example (bob…)]",
             label: "Claude:",
             percentRemaining: 37,
           },
@@ -65,7 +149,7 @@ describe("buildCompactQuotaStatusLine", () => {
       maxWidth: 160,
     });
 
-    expect(line).toBe("Antigravity (ali…): Claude 64% | Antigravity (bob…): Claude 37%");
+    expect(line).toBe("Example (ali…): Claude 64% | Example (bob…): Claude 37%");
   });
 
   it("preserves Gemini CLI model tiers in grouped compact status", () => {
@@ -255,6 +339,53 @@ describe("buildCompactQuotaStatusLine", () => {
     expect(line).toBe("Copilot 75% | +2 issues");
   });
 
+  it("does not count providers intentionally excluded by current-model filtering", () => {
+    const line = buildCompactQuotaStatusLine({
+      maxWidth: 96,
+      data: {
+        entries: [{ name: "OpenAI", percentRemaining: 75 }],
+        errors: [
+          {
+            kind: "intentional-filter",
+            label: "xAI",
+            message: "Skipped (current model: gpt-5.6-sol)",
+          },
+          {
+            kind: "intentional-filter",
+            label: "Ollama Cloud",
+            message: "Skipped (current model: gpt-5.6-sol)",
+          },
+          {
+            kind: "intentional-filter",
+            label: "OpenRouter",
+            message: "Skipped (current model: gpt-5.6-sol)",
+          },
+        ],
+      },
+    });
+
+    expect(line).toBe("OpenAI 75%");
+  });
+
+  it("still counts genuine errors alongside intentional current-model filtering", () => {
+    const line = buildCompactQuotaStatusLine({
+      maxWidth: 96,
+      data: {
+        entries: [{ name: "OpenAI", percentRemaining: 75 }],
+        errors: [
+          {
+            kind: "intentional-filter",
+            label: "OpenRouter",
+            message: "Skipped (current model: gpt-5.6-sol)",
+          },
+          { label: "OpenAI", message: "Failed to parse quota response" },
+        ],
+      },
+    });
+
+    expect(line).toBe("OpenAI 75% | +1 issue");
+  });
+
   it("renders the first error with a remaining count when no quota segments exist", () => {
     const line = buildCompactQuotaStatusLine({
       percentDisplayMode: "remaining",
@@ -289,6 +420,152 @@ describe("buildCompactQuotaStatusLine", () => {
     expect(line).toBe("Copilot 75%");
   });
 
+  it("renders structured quantities atomically with primary rows before supplementary rows", () => {
+    const baseAccounting = {
+      acquisitionMethod: "remote_api",
+      ownership: "maintained",
+      authority: "provider_reported",
+    } as const;
+    const line = buildCompactQuotaStatusLine({
+      accountingDetail: "detailed",
+      maxWidth: 96,
+      data: {
+        entries: [
+          {
+            kind: "quantity",
+            name: "gift",
+            group: "MiMo",
+            accounting: { ...baseAccounting, resultType: "balance" },
+            semantic: {
+              metric: { kind: "component", component: "gift_balance" },
+              prominence: "supplementary",
+            },
+            quantity: { decimal: "8.25", unit: { kind: "currency", code: "CNY" } },
+          },
+          {
+            kind: "quantity",
+            name: "known-spend",
+            group: "Cursor",
+            accounting: { ...baseAccounting, resultType: "spend" },
+            semantic: {
+              metric: { kind: "named", name: "Known API" },
+              prominence: "primary",
+            },
+            quantity: { decimal: "12.5", unit: { kind: "currency", code: "USD" } },
+          },
+        ],
+        errors: [],
+      },
+    });
+
+    expect(line).toContain("Cursor: Known API spend USD 12.50");
+    expect(line).toContain("MiMo: Gift balance CNY 8.25");
+    expect(line.indexOf("Cursor")).toBeLessThan(line.indexOf("MiMo"));
+  });
+
+  it("keeps a structured financial value whole when compact width shortens its label", () => {
+    const line = buildCompactQuotaStatusLine({
+      maxWidth: 22,
+      data: {
+        entries: [
+          {
+            kind: "quantity",
+            name: "balance",
+            group: "A very long provider",
+            accounting: {
+              resultType: "balance",
+              acquisitionMethod: "remote_api",
+              ownership: "maintained",
+              authority: "provider_reported",
+            },
+            semantic: {
+              metric: { kind: "component", component: "current_balance" },
+              prominence: "primary",
+            },
+            quantity: { decimal: "12.5", unit: { kind: "currency", code: "USD" } },
+          },
+        ],
+        errors: [],
+      },
+    });
+
+    expect(line.length).toBeLessThanOrEqual(22);
+    expect(line).toContain("USD 12.50");
+    expect(line).not.toContain("USD 1…");
+  });
+
+  it("admits detailed basis only as a complete compact fact", () => {
+    const entry = {
+      name: "monthly-budget",
+      group: "Zen",
+      accounting: {
+        resultType: "budget",
+        acquisitionMethod: "dashboard_scrape",
+        ownership: "maintained",
+        authority: "locally_derived",
+      },
+      semantic: {
+        metric: { kind: "window", window: "month" },
+        prominence: "primary",
+      },
+      percentRemaining: 94.25,
+      basis: {
+        remaining: {
+          quantity: { decimal: "94.25", unit: { kind: "currency", code: "USD" } },
+          authority: "locally_derived",
+        },
+      },
+    } as const;
+    const narrow = buildCompactQuotaStatusLine({
+      accountingDetail: "detailed",
+      maxWidth: 30,
+      data: { entries: [entry], errors: [] },
+    });
+    const wide = buildCompactQuotaStatusLine({
+      accountingDetail: "detailed",
+      maxWidth: 80,
+      data: { entries: [entry], errors: [] },
+    });
+
+    expect(narrow).not.toContain("Remaining:");
+    expect(wide).toContain("(Remaining: USD 94.25)");
+  });
+
+  it("does not evaluate malformed basis for a suppressed non-finite semantic percent", () => {
+    const line = buildCompactQuotaStatusLine({
+      accountingDetail: "detailed",
+      maxWidth: 80,
+      data: {
+        entries: [
+          {
+            name: "monthly-budget",
+            group: "Zen",
+            accounting: {
+              resultType: "budget",
+              acquisitionMethod: "dashboard_scrape",
+              ownership: "maintained",
+              authority: "locally_derived",
+            },
+            semantic: {
+              metric: { kind: "window", window: "month" },
+              prominence: "primary",
+            },
+            percentRemaining: Number.POSITIVE_INFINITY,
+            basis: {
+              remaining: {
+                quantity: { decimal: "01", unit: { kind: "currency", code: "USD" } },
+                authority: "locally_derived",
+              },
+            },
+          },
+        ],
+        errors: [],
+      },
+    });
+
+    expect(line).toBe("");
+  });
+
   it("collapses whitespace, sanitizes control text, and truncates with ellipsis", () => {
     const line = buildCompactQuotaStatusLine({
       percentDisplayMode: "remaining",
@@ -310,5 +587,85 @@ describe("buildCompactQuotaStatusLine", () => {
     expect(line).not.toContain("\u001b");
     expect(line).not.toContain("\u0007");
     expect(line).not.toContain("\u0003");
+  });
+
+  const TWO_VISIBLE_PROVIDERS = [
+    { name: "Copilot", group: "Copilot", percentRemaining: 5 },
+    { name: "OpenAI", group: "OpenAI ChatGPT Plus Plan", percentRemaining: 81 },
+  ] as const;
+
+  it("makes 36-column overflow explicit without inventing omitted quota values", () => {
+    const line = buildCompactQuotaStatusLine({
+      percentDisplayMode: "remaining",
+      maxWidth: TUI_SIDEBAR_MAX_WIDTH,
+      data: { entries: [...TWO_VISIBLE_PROVIDERS], errors: [] },
+    });
+
+    expect(line).toBe("Copilot 5% | +1");
+    expect(line.length).toBeLessThanOrEqual(TUI_SIDEBAR_MAX_WIDTH);
+    expect(line).not.toContain("81%");
+    expect(line).not.toContain("OpenAI");
+  });
+
+  it("keeps used and remaining modes when only one of two providers fits", () => {
+    const remaining = buildCompactQuotaStatusLine({
+      percentDisplayMode: "remaining",
+      maxWidth: TUI_SIDEBAR_MAX_WIDTH,
+      data: { entries: [...TWO_VISIBLE_PROVIDERS], errors: [] },
+    });
+    const used = buildCompactQuotaStatusLine({
+      percentDisplayMode: "used",
+      maxWidth: TUI_SIDEBAR_MAX_WIDTH,
+      data: { entries: [...TWO_VISIBLE_PROVIDERS], errors: [] },
+    });
+
+    expect(remaining).toBe("Copilot 5% | +1");
+    expect(used).toBe("Copilot 95% | +1");
+    expect(used.length).toBeLessThanOrEqual(TUI_SIDEBAR_MAX_WIDTH);
+  });
+
+  it("keeps overflow explicit at a narrower width", () => {
+    const line = buildCompactQuotaStatusLine({
+      percentDisplayMode: "remaining",
+      maxWidth: 20,
+      data: { entries: [...TWO_VISIBLE_PROVIDERS], errors: [] },
+    });
+
+    expect(line).toBe("Copilot 5% | +1");
+    expect(line.length).toBeLessThanOrEqual(20);
+  });
+
+  it("counts omitted visible providers in the overflow marker", () => {
+    const line = buildCompactQuotaStatusLine({
+      percentDisplayMode: "remaining",
+      maxWidth: TUI_SIDEBAR_MAX_WIDTH,
+      data: {
+        entries: [
+          ...TWO_VISIBLE_PROVIDERS,
+          { name: "GLM", group: "GLM Coding Plan Weekly", percentRemaining: 12 },
+        ],
+        errors: [],
+      },
+    });
+
+    expect(line).toBe("Copilot 5% | +2");
+    expect(line).not.toContain("12%");
+  });
+
+  it("does not append overflow when both visible providers fit", () => {
+    const line = buildCompactQuotaStatusLine({
+      percentDisplayMode: "remaining",
+      maxWidth: TUI_SIDEBAR_MAX_WIDTH,
+      data: {
+        entries: [
+          { name: "Copilot", group: "Copilot", percentRemaining: 5 },
+          { name: "OpenAI", group: "OpenAI", percentRemaining: 81 },
+        ],
+        errors: [],
+      },
+    });
+
+    expect(line).toBe("Copilot 5% | OpenAI 81%");
+    expect(line).not.toContain("+1");
   });
 });

@@ -4,16 +4,22 @@ import businessTeamMonthlyUsage from "./fixtures/openai/business-team-monthly.sa
 
 const mocks = vi.hoisted(() => ({
   readAuthFileCached: vi.fn(),
+  deriveResolvedAuthIdentity: vi.fn(async () => "rai1_test-opaque-identity"),
 }));
 
 vi.mock("../src/lib/opencode-auth.js", () => ({
   readAuthFileCached: mocks.readAuthFileCached,
 }));
 
+vi.mock("../src/lib/resolved-auth-identity.js", () => ({
+  deriveResolvedAuthIdentity: mocks.deriveResolvedAuthIdentity,
+}));
+
 import {
   DEFAULT_OPENAI_AUTH_CACHE_MAX_AGE_MS,
   hasOpenAIOAuthCached,
   queryOpenAIQuota,
+  resolveOpenAIAuthIdentity,
   resolveOpenAIOAuth,
 } from "../src/lib/openai.js";
 
@@ -35,6 +41,59 @@ describe("openai auth resolution", () => {
     vi.unstubAllGlobals();
   });
 
+  it("prefers the resolved stable account id for opaque cache identity", async () => {
+    mocks.readAuthFileCached.mockResolvedValue({
+      openai: {
+        type: "oauth",
+        access: "access-secret",
+        refresh: "refresh-secret",
+        accountId: "account-stable-id",
+      },
+    });
+
+    await expect(resolveOpenAIAuthIdentity()).resolves.toBe("rai1_test-opaque-identity");
+    expect(mocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
+      providerId: "openai",
+      principal: { kind: "stable-id", value: "account-stable-id" },
+    });
+    expect(JSON.stringify(await resolveOpenAIAuthIdentity())).not.toMatch(
+      /access-secret|refresh-secret|account-stable-id/u,
+    );
+  });
+
+  it("uses the winning credential rather than advisory email when no account id exists", async () => {
+    const emailPayload = Buffer.from(JSON.stringify({ email: "shared@example.com" })).toString(
+      "base64url",
+    );
+    mocks.readAuthFileCached
+      .mockResolvedValueOnce({
+        openai: {
+          type: "oauth",
+          access: `header.${emailPayload}.signature-one`,
+          refresh: "refresh-secret-one",
+        },
+      })
+      .mockResolvedValueOnce({
+        openai: {
+          type: "oauth",
+          access: `header.${emailPayload}.signature-two`,
+          refresh: "refresh-secret-two",
+        },
+      });
+
+    await resolveOpenAIAuthIdentity();
+    await resolveOpenAIAuthIdentity();
+
+    expect(mocks.deriveResolvedAuthIdentity).toHaveBeenNthCalledWith(1, {
+      providerId: "openai",
+      principal: { kind: "credential", value: "refresh-secret-one" },
+    });
+    expect(mocks.deriveResolvedAuthIdentity).toHaveBeenNthCalledWith(2, {
+      providerId: "openai",
+      principal: { kind: "credential", value: "refresh-secret-two" },
+    });
+  });
+
   it("returns none when no supported native OpenCode auth entry exists", () => {
     expect(resolveOpenAIOAuth({})).toEqual({ state: "none" });
   });
@@ -54,12 +113,63 @@ describe("openai auth resolution", () => {
     });
   });
 
+  it("keeps a login OpenCode could not return present, with no identity and a clear error", async () => {
+    const failed = { openai: { type: "oauth", resolveError: "refresh_failed: HTTP 400" } };
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(resolveOpenAIOAuth(failed)).toEqual({
+      state: "failed",
+      sourceKey: "openai",
+      error: "refresh_failed: HTTP 400",
+    });
+    mocks.readAuthFileCached.mockResolvedValue(failed);
+    await expect(hasOpenAIOAuthCached()).resolves.toBe(true);
+    await expect(resolveOpenAIAuthIdentity()).resolves.toBeNull();
+    await expect(queryOpenAIQuota()).resolves.toEqual({
+      success: false,
+      error:
+        "OpenAI sign-in could not be refreshed: refresh_failed: HTTP 400. Run `opencode auth login openai`.",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mocks.deriveResolvedAuthIdentity).not.toHaveBeenCalled();
+  });
+
+  it("names the logout command for a failed login with a shell-safe label (#316)", async () => {
+    const failed = resolveOpenAIOAuth({
+      openai: { type: "oauth", resolveError: "refresh_failed: Request failed: 401" },
+    });
+
+    await expect(queryOpenAIQuota({ auth: failed, loginLabel: "default" })).resolves.toEqual({
+      success: false,
+      error:
+        "OpenAI sign-in could not be refreshed: refresh_failed: Request failed: 401. Run `opencode auth logout openai default`, then `opencode auth login openai`.",
+    });
+    for (const loginLabel of ["My work; rm", " Work ", "--help"]) {
+      await expect(queryOpenAIQuota({ auth: failed, loginLabel })).resolves.toEqual({
+        success: false,
+        error:
+          "OpenAI sign-in could not be refreshed: refresh_failed: Request failed: 401. Run `opencode auth login openai`.",
+      });
+    }
+  });
+
+  it("lets a failed openai login win over a later compatibility key, as a configured one would", () => {
+    expect(
+      resolveOpenAIOAuth({
+        openai: { type: "oauth", resolveError: "resolve_empty: no value" },
+        codex: { type: "oauth", access: "codex-token" },
+      }),
+    ).toEqual({ state: "failed", sourceKey: "openai", error: "resolve_empty: no value" });
+  });
+
   it("returns null when quota is not configured", async () => {
     mocks.readAuthFileCached.mockResolvedValueOnce({});
 
     await expect(queryOpenAIQuota()).resolves.toBeNull();
     expect(mocks.readAuthFileCached).toHaveBeenCalledWith({
       maxAgeMs: DEFAULT_OPENAI_AUTH_CACHE_MAX_AGE_MS,
+      integrationIds: ["openai", "codex", "chatgpt"],
     });
   });
 
@@ -70,6 +180,56 @@ describe("openai auth resolution", () => {
 
     const out = await queryOpenAIQuota();
     expect(out && !out.success ? out.error : "").toContain("Token expired");
+  });
+
+  it("does not echo upstream response identity material in errors", async () => {
+    mocks.readAuthFileCached.mockResolvedValueOnce({
+      openai: { type: "oauth", access: "access-secret", expires: Date.now() + 60_000 },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: "account alice@example.com account-id-123 access-secret",
+            }),
+            { status: 403 },
+          ),
+      ) as any,
+    );
+
+    const result = await queryOpenAIQuota();
+    expect(result).toEqual({ success: false, error: "OpenAI API error 403" });
+    expect(JSON.stringify(result)).not.toMatch(/alice@example\.com|account-id-123|access-secret/u);
+  });
+
+  it("adds only OpenAI's short error code to an HTTP error (#316)", async () => {
+    const respond = (code: unknown) =>
+      new Response(
+        JSON.stringify({
+          error: {
+            message: "Unauthorized alice@example.com",
+            type: "rejected_by_access_enforcement",
+            code,
+          },
+        }),
+        { status: 401 },
+      );
+    const openai = { type: "oauth", access: "a.b.c", expires: Date.now() + 60_000 };
+    mocks.readAuthFileCached.mockResolvedValue({ openai });
+
+    vi.stubGlobal("fetch", vi.fn(async () => respond("no_matching_rule")) as any);
+    await expect(queryOpenAIQuota()).resolves.toEqual({
+      success: false,
+      error: "OpenAI API error 401 (no_matching_rule)",
+    });
+
+    vi.stubGlobal("fetch", vi.fn(async () => respond("alice@example.com is blocked")) as any);
+    await expect(queryOpenAIQuota()).resolves.toEqual({
+      success: false,
+      error: "OpenAI API error 401",
+    });
   });
 
   it("reads auth from chatgpt when codex and openai are absent", async () => {
@@ -103,38 +263,24 @@ describe("openai auth resolution", () => {
     expect(out && out.success ? out.windows.hourly?.percentRemaining : -1).toBe(80);
   });
 
-  it("reads auth from opencode when higher-priority keys are unusable", async () => {
+  it("never treats the OpenCode Console login under opencode as an OpenAI login", async () => {
+    // OpenCode 2 imports a legacy console login as `methodID: "device"`, often without an orgID.
     mocks.readAuthFileCached.mockResolvedValueOnce({
       codex: { type: "oauth", access: "   " },
       openai: { type: "api", access: "ignored" },
       chatgpt: { type: "oauth", access: "   " },
-      opencode: { type: "oauth", access: "a.b.c", expires: Date.now() + 60_000 },
-    });
+      opencode: {
+        type: "oauth",
+        methodID: "device",
+        access: "console-token",
+        expires: Date.now() + 60_000,
+      },
+    } as any);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        async () =>
-          new Response(
-            JSON.stringify({
-              plan_type: "free",
-              rate_limit: {
-                limit_reached: false,
-                primary_window: {
-                  used_percent: 50,
-                  limit_window_seconds: 18_000,
-                  reset_after_seconds: 3600,
-                },
-                secondary_window: null,
-              },
-            }),
-            { status: 200 },
-          ),
-      ) as any,
-    );
-
-    const out = await queryOpenAIQuota();
-    expect(out && out.success ? out.windows.hourly?.percentRemaining : -1).toBe(50);
+    await expect(queryOpenAIQuota()).resolves.toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("uses cached auth reads for hasOpenAIOAuthCached", async () => {
@@ -145,6 +291,7 @@ describe("openai auth resolution", () => {
     await expect(hasOpenAIOAuthCached()).resolves.toBe(true);
     expect(mocks.readAuthFileCached).toHaveBeenCalledWith({
       maxAgeMs: DEFAULT_OPENAI_AUTH_CACHE_MAX_AGE_MS,
+      integrationIds: ["openai", "codex", "chatgpt"],
     });
   });
 
@@ -266,6 +413,13 @@ describe("openai auth resolution", () => {
       hourly: {
         percentRemaining: 80,
         resetTimeIso: "2026-01-01T01:00:00.000Z",
+        fixedWindow: {
+          kind: "fixed_window",
+          startedAtIso: "2025-12-31T20:00:00.000Z",
+          observedAtIso: "2026-01-01T00:00:00.000Z",
+          endsAtIso: "2026-01-01T01:00:00.000Z",
+          fullReset: true,
+        },
       },
       codeReview: {
         percentRemaining: 95,
@@ -578,6 +732,13 @@ describe("openai auth resolution", () => {
       hourly: {
         percentRemaining: 80,
         resetTimeIso: "2026-01-01T01:00:00.000Z",
+        fixedWindow: {
+          kind: "fixed_window",
+          startedAtIso: "2025-12-31T20:00:00.000Z",
+          observedAtIso: "2026-01-01T00:00:00.000Z",
+          endsAtIso: "2026-01-01T01:00:00.000Z",
+          fullReset: true,
+        },
       },
       weekly: {
         percentRemaining: 30,

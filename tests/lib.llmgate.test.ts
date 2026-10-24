@@ -10,7 +10,7 @@ import {
 
 vi.mock("../src/lib/opencode-auth.js", () => ({
   readAuthFile: vi.fn(),
-  getAuthPaths: vi.fn(() => ["/tmp/auth.json"]),
+  getCredentialDatabasePaths: vi.fn(() => ["/tmp/opencode.db"]),
 }));
 
 function connectedAuth() {
@@ -47,20 +47,26 @@ describe("llmgate quota", () => {
   it("returns billing quota windows using the login access token", async () => {
     const { readAuthFile } = await import("../src/lib/opencode-auth.js");
     (readAuthFile as any).mockResolvedValue(connectedAuth());
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      code: 200,
-      message: "success",
-      data: {
-        plan_code: "pro5x",
-        plan_name: "Pro 5x",
-        status: "active",
-        credit_balance: 12.5,
-        usage_quota: {
-          five_hour: { limit: 50, used: 36.5, remaining: 13.5, reset_at_unix: 1784610984 },
-          weekly: { limit: 275, used: 40, remaining: 235, reset_at_unix: 1784956584 },
-        },
-      },
-    }), { status: 200 })) as any;
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: 200,
+            message: "success",
+            data: {
+              plan_code: "pro5x",
+              plan_name: "Pro 5x",
+              status: "active",
+              credit_balance: 12.5,
+              usage_quota: {
+                five_hour: { limit: 50, used: 36.5, remaining: 13.5, reset_at_unix: 1784610984 },
+                weekly: { limit: 275, used: 40, remaining: 235, reset_at_unix: 1784956584 },
+              },
+            },
+          }),
+          { status: 200 },
+        ),
+    ) as any;
     vi.stubGlobal("fetch", fetchMock);
 
     const out = await queryLlmGateQuota({ requestTimeoutMs: 9876 });
@@ -112,7 +118,12 @@ describe("llmgate quota", () => {
   it("reports malformed billing payloads", async () => {
     const { readAuthFile } = await import("../src/lib/opencode-auth.js");
     (readAuthFile as any).mockResolvedValue(connectedAuth());
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ data: { usage_quota: {} } }), { status: 200 })) as any);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () => new Response(JSON.stringify({ data: { usage_quota: {} } }), { status: 200 }),
+      ) as any,
+    );
 
     const out = await queryLlmGateQuota();
     expect(out && !out.success ? out.error : "").toBe(
@@ -129,7 +140,7 @@ describe("llmgate quota", () => {
       configured: true,
       accessTokenConfigured: true,
       refreshTokenConfigured: true,
-      authPaths: ["/tmp/auth.json"],
+      authPaths: ["/tmp/opencode.db"],
     });
   });
 });

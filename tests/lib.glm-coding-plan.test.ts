@@ -40,7 +40,7 @@ function configure(provider: ProviderCase): void {
   provider.resolveAuth.mockResolvedValueOnce({
     state: "configured",
     apiKey: provider.key,
-    source: "auth.json",
+    source: "opencode.db",
   });
 }
 
@@ -55,6 +55,18 @@ function stubJson(body: unknown, status = 200) {
         status,
         headers: { "Content-Type": "application/json" },
       }),
+  );
+  vi.stubGlobal("fetch", fetchMock as any);
+  return fetchMock;
+}
+
+function stubParsedJson(body: unknown) {
+  const fetchMock = vi.fn(
+    async () =>
+      ({
+        ok: true,
+        json: async () => body,
+      }) as Response,
   );
   vi.stubGlobal("fetch", fetchMock as any);
   return fetchMock;
@@ -223,6 +235,220 @@ describe("provider-specific GLM envelopes", () => {
       await expect(queryZaiQuota()).resolves.toEqual({
         success: false,
         error: testCase.error,
+      });
+    }
+  });
+
+  it("maps credit limits to percent windows for both providers without inferring credit amounts", async () => {
+    const resetMs = 1_735_776_000_000;
+    const creditLimits = [
+      {
+        type: "CREDIT_LIMIT",
+        unit: 3,
+        number: 1,
+        usage: 12_000,
+        currentValue: 569,
+        remaining: 11_430,
+        percentage: 4,
+        nextResetTime: resetMs,
+      },
+      {
+        type: "CREDIT_LIMIT",
+        unit: 6,
+        number: 1,
+        usage: 60_000,
+        currentValue: 569,
+        remaining: 59_430,
+        percentage: 1,
+        nextResetTime: resetMs + 1_000,
+      },
+    ];
+
+    configure(providers[0]);
+    stubJson(quotaResponse(creditLimits));
+    const zaiResult = await queryZaiQuota();
+    expect(zaiResult).toEqual({
+      success: true,
+      label: "Z.ai",
+      windows: {
+        fiveHour: {
+          percentRemaining: 95,
+          resetTimeIso: new Date(resetMs).toISOString(),
+        },
+        weekly: {
+          percentRemaining: 99,
+          resetTimeIso: new Date(resetMs + 1_000).toISOString(),
+        },
+      },
+    });
+    expect(zaiResult).not.toHaveProperty("windows.fiveHour.usage");
+    expect(zaiResult).not.toHaveProperty("windows.fiveHour.currentValue");
+    expect(zaiResult).not.toHaveProperty("windows.fiveHour.remaining");
+
+    configure(providers[1]);
+    stubJson(quotaResponse(creditLimits));
+    const zhipuResult = await queryZhipuQuota();
+    expect(zhipuResult).toEqual({
+      success: true,
+      label: "Zhipu",
+      windows: {
+        fiveHour: {
+          percentRemaining: 95,
+          resetTimeIso: new Date(resetMs).toISOString(),
+        },
+        weekly: {
+          percentRemaining: 99,
+          resetTimeIso: new Date(resetMs + 1_000).toISOString(),
+        },
+      },
+    });
+    expect(zhipuResult).not.toHaveProperty("windows.fiveHour.usage");
+    expect(zhipuResult).not.toHaveProperty("windows.fiveHour.currentValue");
+    expect(zhipuResult).not.toHaveProperty("windows.fiveHour.remaining");
+  });
+
+  it("falls back to reported credit percentages when exact values are absent or invalid", async () => {
+    const cases = [
+      {
+        name: "missing current value",
+        limit: { type: "CREDIT_LIMIT", unit: 3, usage: 12_000, percentage: 4 },
+        expected: 96,
+      },
+      {
+        name: "zero usage",
+        limit: {
+          type: "CREDIT_LIMIT",
+          unit: 3,
+          usage: 0,
+          currentValue: 569,
+          percentage: 11,
+        },
+        expected: 89,
+      },
+      {
+        name: "negative usage",
+        limit: {
+          type: "CREDIT_LIMIT",
+          unit: 3,
+          usage: -12_000,
+          currentValue: 569,
+          percentage: 12,
+        },
+        expected: 88,
+      },
+      {
+        name: "negative current value",
+        limit: {
+          type: "CREDIT_LIMIT",
+          unit: 3,
+          usage: 12_000,
+          currentValue: -1,
+          percentage: 13,
+        },
+        expected: 87,
+      },
+      {
+        name: "non-finite usage",
+        limit: {
+          type: "CREDIT_LIMIT",
+          unit: 3,
+          usage: Number.POSITIVE_INFINITY,
+          currentValue: 569,
+          percentage: 14,
+        },
+        expected: 86,
+      },
+      {
+        name: "non-finite current value",
+        limit: {
+          type: "CREDIT_LIMIT",
+          unit: 3,
+          usage: 12_000,
+          currentValue: Number.NaN,
+          percentage: 15,
+        },
+        expected: 85,
+      },
+      {
+        name: "non-finite fallback percentage",
+        limit: {
+          type: "CREDIT_LIMIT",
+          unit: 3,
+          usage: 12_000,
+          percentage: Number.POSITIVE_INFINITY,
+        },
+        expected: 0,
+      },
+    ];
+
+    for (const provider of providers) {
+      for (const testCase of cases) {
+        configure(provider);
+        stubParsedJson(quotaResponse([testCase.limit]));
+
+        await expect(provider.query(), `${provider.label}: ${testCase.name}`).resolves.toEqual({
+          success: true,
+          label: provider.label,
+          windows: {
+            fiveHour: { percentRemaining: testCase.expected, resetTimeIso: undefined },
+          },
+        });
+      }
+    }
+  });
+
+  it("clamps exact credit percentages for both providers", async () => {
+    const creditLimits = [
+      {
+        type: "CREDIT_LIMIT",
+        unit: 3,
+        usage: 100,
+        currentValue: 150,
+        percentage: 25,
+      },
+      {
+        type: "CREDIT_LIMIT",
+        unit: 6,
+        usage: 100,
+        currentValue: 0,
+        percentage: 25,
+      },
+    ];
+
+    for (const provider of providers) {
+      configure(provider);
+      stubJson(quotaResponse(creditLimits));
+
+      await expect(provider.query(), provider.label).resolves.toEqual({
+        success: true,
+        label: provider.label,
+        windows: {
+          fiveHour: { percentRemaining: 0, resetTimeIso: undefined },
+          weekly: { percentRemaining: 100, resetTimeIso: undefined },
+        },
+      });
+    }
+  });
+
+  it("keeps token limits on the provider percentage path", async () => {
+    const tokenLimit = {
+      type: "TOKENS_LIMIT",
+      unit: 3,
+      usage: 12_000,
+      currentValue: 569,
+      percentage: 4,
+    };
+
+    for (const provider of providers) {
+      configure(provider);
+      stubJson(quotaResponse([tokenLimit]));
+
+      await expect(provider.query(), provider.label).resolves.toEqual({
+        success: true,
+        label: provider.label,
+        windows: {
+          fiveHour: { percentRemaining: 96, resetTimeIso: undefined },
+        },
       });
     }
   });

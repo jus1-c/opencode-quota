@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { googleAgyProvider } from "../src/providers/google-agy.js";
+import { formatAgyCredentialGroup, googleAgyProvider } from "../src/providers/google-agy.js";
 import {
   expectAttemptedWithErrorLabel,
   expectAttemptedWithNoErrors,
@@ -8,6 +8,7 @@ import {
 } from "./helpers/provider-assertions.js";
 
 vi.mock("../src/lib/google-agy.js", () => ({
+  AGY_AUTH_KEYS: ["google-agy", "opencode-agy-auth", "google-agy-auth"],
   hasAgyQuotaRuntimeAvailable: vi.fn(),
   queryGoogleAgyQuota: vi.fn(),
   inspectAgyAuthPresence: vi.fn(async () => ({
@@ -33,7 +34,6 @@ function bucket(overrides: Record<string, unknown> = {}) {
     bucketId: "gemini-weekly",
     percentRemaining: 58,
     accountEmail: "alice@example.com",
-    accountKey: "aaaaaaaa11111111",
     accountIndex: 0,
     sourceKey: "google-agy",
     ...overrides,
@@ -46,13 +46,13 @@ describe("google agy provider", () => {
     (queryGoogleAgyQuota as any).mockResolvedValue(null);
 
     await googleAgyProvider.fetch({ client: {}, config: { requestTimeoutMs: 5000 } } as any);
-    expect(queryGoogleAgyQuota).toHaveBeenLastCalledWith({}, { requestTimeoutMs: undefined });
+    expect(queryGoogleAgyQuota).toHaveBeenLastCalledWith({ requestTimeoutMs: undefined });
 
     await googleAgyProvider.fetch({
       client: {},
       config: { requestTimeoutMs: 12000, requestTimeoutMsConfigured: true },
     } as any);
-    expect(queryGoogleAgyQuota).toHaveBeenLastCalledWith({}, { requestTimeoutMs: 12000 });
+    expect(queryGoogleAgyQuota).toHaveBeenLastCalledWith({ requestTimeoutMs: 12000 });
   });
 
   it("returns attempted:false when Google AGY auth is not configured", async () => {
@@ -136,9 +136,7 @@ describe("google agy provider", () => {
     expect(out.presentation).toEqual({
       singleWindowShowRight: true,
     });
-    expect(out.entries.every((entry) => entry.accounting.sourceId === "aaaaaaaa11111111")).toBe(
-      true,
-    );
+    expect(out.entries.every((entry) => entry.accounting.sourceId === "account-1")).toBe(true);
   });
 
   it("keeps account order and email-less accounts distinct", async () => {
@@ -148,13 +146,11 @@ describe("google agy provider", () => {
       buckets: [
         bucket({
           accountEmail: undefined,
-          accountKey: "aaaaaaaa11111111",
           accountIndex: 0,
           percentRemaining: 20,
         }),
         bucket({
           accountEmail: undefined,
-          accountKey: "bbbbbbbb22222222",
           accountIndex: 1,
           percentRemaining: 80,
         }),
@@ -164,8 +160,12 @@ describe("google agy provider", () => {
     const out = await googleAgyProvider.fetch({ client: {} } as any);
     expectAttemptedWithNoErrors(out);
     expect(out.entries.map((entry) => entry.name)).toEqual([
-      "Gemini Models (Account aaaaaaaa)",
-      "Gemini Models (Account bbbbbbbb)",
+      "Gemini Models (Account 1)",
+      "Gemini Models (Account 2)",
+    ]);
+    expect(out.entries.map((entry) => entry.accounting.sourceId)).toEqual([
+      "account-1",
+      "account-2",
     ]);
     expect(out.entries.map((entry) => entry.percentRemaining)).toEqual([20, 80]);
   });
@@ -250,5 +250,30 @@ describe("google agy provider", () => {
     expect(googleAgyProvider.matchesCurrentModel?.("opencode-agy-auth/gpt-4")).toBe(true);
     expect(googleAgyProvider.matchesCurrentModel?.("google-agy-auth/gpt-4")).toBe(true);
     expect(googleAgyProvider.matchesCurrentModel?.("google/claude-opus")).toBe(false);
+  });
+
+  describe("formatAgyCredentialGroup", () => {
+    it("formats credential names with active markers", () => {
+      expect(
+        formatAgyCredentialGroup("[Google AGY Antigravity CLI (plugin) 2] (active)", "Gemini"),
+      ).toBe("[Google AGY Antigravity CLI (plugin) 2: Gemini] (active)");
+    });
+
+    it("formats simple bracketed names", () => {
+      expect(formatAgyCredentialGroup("[Google AGY]", "Claude/GPT")).toBe(
+        "[Google AGY: Claude/GPT]",
+      );
+    });
+
+    it("formats names without brackets", () => {
+      expect(formatAgyCredentialGroup("Google AGY Work", "Gemini")).toBe(
+        "[Google AGY Work: Gemini]",
+      );
+    });
+
+    it("trims whitespace and handles empty family label", () => {
+      expect(formatAgyCredentialGroup("  [Google AGY]  ", "Gemini")).toBe("[Google AGY: Gemini]");
+      expect(formatAgyCredentialGroup("[Google AGY]", "")).toBe("[Google AGY]");
+    });
   });
 });

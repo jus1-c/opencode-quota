@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { rm } from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const TEST_RUNTIME_ROOT = "/tmp/opencode-quota-provider-cache-tests";
 
 import type { QuotaProviderContext } from "../src/lib/entries.js";
 import type {
@@ -12,6 +15,15 @@ const runtimeMocks = vi.hoisted(() => ({
   fetchRemoteQuotaProvider: vi.fn(),
   collectLocalQuotaProviderEstimate: vi.fn(),
   inspectLocalQuotaProviderState: vi.fn(),
+}));
+
+vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
+  getOpencodeRuntimeDirs: () => ({
+    dataDir: `${TEST_RUNTIME_ROOT}/data`,
+    configDir: `${TEST_RUNTIME_ROOT}/config`,
+    cacheDir: `${TEST_RUNTIME_ROOT}/cache`,
+    stateDir: `${TEST_RUNTIME_ROOT}/state`,
+  }),
 }));
 
 vi.mock("../src/lib/quota-providers-remote.js", async (importOriginal) => {
@@ -28,11 +40,24 @@ vi.mock("../src/lib/quota-providers-local.js", () => ({
   inspectLocalQuotaProviderState: runtimeMocks.inspectLocalQuotaProviderState,
 }));
 
+vi.mock("../src/lib/resolved-auth-identity.js", () => ({
+  deriveResolvedAuthIdentity: vi.fn(
+    async (params: { providerId: string; principal: { value: string } }) =>
+      `opaque:${params.providerId}:${params.principal.value}`,
+  ),
+  composeResolvedAuthIdentities: vi.fn(
+    async (params: { providerId: string; identities: readonly string[] }) =>
+      `opaque:${params.providerId}:${params.identities.join("|")}`,
+  ),
+}));
+
+import { __resetQuotaStateForTests, fetchQuotaProviderResult } from "../src/lib/quota-state.js";
 import {
   QUOTA_PROVIDERS_PROVIDER_ID,
   quotaProvidersProvider,
   selectEligibleQuotaProviders,
 } from "../src/providers/quota-providers.js";
+import { getProviders } from "../src/providers/registry.js";
 
 function remote(
   id: string,
@@ -67,7 +92,6 @@ function context(
     client,
     resolveRuntimeProviderIds: createRuntimeProviderIdResolver(client),
     config: {
-      googleModels: [],
       anthropicBinaryPath: "claude",
       cursorPlan: "none",
       opencodeGoWindows: ["rolling", "weekly", "monthly"],
@@ -79,12 +103,14 @@ function context(
 }
 
 describe("quota-providers aggregate provider", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    __resetQuotaStateForTests();
+    await rm(TEST_RUNTIME_ROOT, { recursive: true, force: true });
     runtimeMocks.resolveQuotaProviderApiKey.mockReset().mockResolvedValue({
       key: "secret",
-      source: "auth.json",
+      source: "opencode.db",
       checkedPaths: ["/trusted/opencode.json"],
-      authPaths: ["/trusted/auth.json"],
+      credentialDatabasePaths: ["/trusted/opencode.db"],
     });
     runtimeMocks.fetchRemoteQuotaProvider.mockReset().mockResolvedValue({
       success: true,
@@ -108,6 +134,10 @@ describe("quota-providers aggregate provider", () => {
       version: 1,
       lastUpdatedAt: 1,
     });
+  });
+
+  afterEach(async () => {
+    await rm(TEST_RUNTIME_ROOT, { recursive: true, force: true });
   });
 
   it("uses one stable aggregate identity", () => {
@@ -209,21 +239,34 @@ describe("quota-providers aggregate provider", () => {
     ).toBe(true);
   });
 
-  it("skips maintained Qwen and Alibaba tuning in the aggregate", () => {
+  it("skips maintained Alibaba tuning in the aggregate", () => {
     const definitions: QuotaProviderDefinition[] = [
       {
-        id: "qwen-code",
-        providerId: "qwen-code",
-        label: "qwen-code",
+        id: "alibaba-coding-plan",
+        providerId: "alibaba-coding-plan",
+        label: "alibaba-coding-plan",
         mode: "local-estimate",
         windows: [
-          { id: "daily", label: "daily", type: "utc-day", requestLimit: 1000 },
           {
-            id: "rpm",
-            label: "rpm",
+            id: "five-hour",
+            label: "five-hour",
             type: "rolling",
-            durationMinutes: 1,
-            requestLimit: 60,
+            durationMinutes: 300,
+            requestLimit: 1200,
+          },
+          {
+            id: "weekly",
+            label: "weekly",
+            type: "rolling",
+            durationMinutes: 10080,
+            requestLimit: 9000,
+          },
+          {
+            id: "monthly",
+            label: "monthly",
+            type: "rolling",
+            durationMinutes: 43200,
+            requestLimit: 18000,
           },
         ],
       },
@@ -232,7 +275,7 @@ describe("quota-providers aggregate provider", () => {
     expect(
       selectEligibleQuotaProviders({
         definitions,
-        availableProviderIds: new Set(["qwen-code", "custom"]),
+        availableProviderIds: new Set(["alibaba-coding-plan", "custom"]),
       }).map((definition) => definition.id),
     ).toEqual(["custom"]);
   });
@@ -267,6 +310,46 @@ describe("quota-providers aggregate provider", () => {
       "second",
     ]);
     expect(result.statusDetails).toBeUndefined();
+  });
+
+  it("isolates the production nested remote cache by the winning credential", async () => {
+    const definition = remote("accounted", "provider-one");
+    const ctx = context([definition], ["provider-one"], { providerCacheTtlMs: 60_000 });
+    const provider = getProviders().find((candidate) => candidate.id === "quota-providers");
+    if (!provider) throw new Error("Expected aggregate provider");
+
+    let credential = "account-one";
+    runtimeMocks.resolveQuotaProviderApiKey.mockImplementation(async () => ({
+      key: credential,
+      source: "opencode.db",
+      checkedPaths: [],
+      credentialDatabasePaths: ["/trusted/opencode.db"],
+    }));
+    runtimeMocks.fetchRemoteQuotaProvider.mockImplementation(async (_definition, key) => ({
+      success: true,
+      entries: [
+        {
+          accounting: {
+            resultType: "quota",
+            acquisitionMethod: "remote_api",
+            ownership: "user_configured",
+            authority: "provider_reported",
+          },
+          name: key === "account-one" ? "Account one" : "Account two",
+          percentRemaining: key === "account-one" ? 70 : 30,
+        },
+      ],
+    }));
+
+    const first = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+    const cached = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+    credential = "account-two";
+    const second = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+
+    expect(first.entries[0]?.name).toBe("Account one");
+    expect(cached.entries[0]?.name).toBe("Account one");
+    expect(second.entries[0]?.name).toBe("Account two");
+    expect(runtimeMocks.fetchRemoteQuotaProvider).toHaveBeenCalledTimes(2);
   });
 
   it("refreshes mixed local data while retaining remote definition caching", async () => {
@@ -431,9 +514,9 @@ describe("quota-providers aggregate provider", () => {
       providerId: "runtime-provider",
       mode: "remote-api",
       format: "quota-v1",
-      credentialSource: "auth_json",
+      credentialSource: "opencode_db",
       checkedPaths: ["/trusted/opencode.json"],
-      authPaths: ["/trusted/auth.json"],
+      credentialDatabasePaths: ["/trusted/opencode.db"],
     });
     expect(JSON.stringify(result.diagnostics)).not.toContain("secret");
   });

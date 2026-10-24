@@ -1,12 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-
+import { llmGateProvider } from "../src/providers/llmgate.js";
 import {
   expectAttemptedWithErrorLabel,
   expectAttemptedWithNoErrors,
   expectNotAttempted,
   visibleEntries,
 } from "./helpers/provider-assertions.js";
-import { llmGateProvider } from "../src/providers/llmgate.js";
 
 vi.mock("../src/lib/llmgate.js", () => ({
   queryLlmGateQuota: vi.fn(),
@@ -88,7 +87,9 @@ describe("llmgate provider", () => {
 
   it("is available only when both LLMGate provider and login tokens are available", async () => {
     const { hasLlmGateAuthTokens } = await import("../src/lib/llmgate.js");
-    const { isCanonicalProviderWithModelsAvailable } = await import("../src/lib/provider-availability.js");
+    const { isCanonicalProviderWithModelsAvailable } = await import(
+      "../src/lib/provider-availability.js"
+    );
     (isCanonicalProviderWithModelsAvailable as any).mockResolvedValueOnce(true);
     (hasLlmGateAuthTokens as any).mockResolvedValueOnce(true);
 
@@ -103,7 +104,9 @@ describe("llmgate provider", () => {
 
   it("is unavailable when the LLMGate provider is absent even with login tokens", async () => {
     const { hasLlmGateAuthTokens } = await import("../src/lib/llmgate.js");
-    const { isCanonicalProviderWithModelsAvailable } = await import("../src/lib/provider-availability.js");
+    const { isCanonicalProviderWithModelsAvailable } = await import(
+      "../src/lib/provider-availability.js"
+    );
     (isCanonicalProviderWithModelsAvailable as any).mockResolvedValueOnce(false);
     (hasLlmGateAuthTokens as any).mockResolvedValueOnce(true);
 

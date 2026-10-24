@@ -5,7 +5,7 @@ import {
 } from "./api-key-resolver.js";
 import { sanitizeSingleLineDisplayText } from "./display-sanitize.js";
 import type { AccountingResultType, QuotaToastEntry } from "./entries.js";
-import { getAuthPaths, readAuthFile } from "./opencode-auth.js";
+import { getCredentialDatabasePaths, readAuthFile } from "./opencode-auth.js";
 import type {
   JsonV1Mapping,
   JsonV1NumberSource,
@@ -39,14 +39,15 @@ const RESULT_TYPES = new Set<AccountingResultType>([
   "status",
 ]);
 const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const JSON_V1_DECIMAL_TEXT_RE = /^-?\d+(?:\.\d+)?$/;
 
-export type QuotaProviderAuthSource = "env" | "opencode.json" | "opencode.jsonc" | "auth.json";
+export type QuotaProviderAuthSource = "env" | "opencode.json" | "opencode.jsonc" | "opencode.db";
 
 export interface QuotaProviderAuthResolution {
   key?: string;
   source: QuotaProviderAuthSource | null;
   checkedPaths: string[];
-  authPaths: string[];
+  credentialDatabasePaths: string[];
 }
 
 export type RemoteQuotaProviderResult =
@@ -103,9 +104,11 @@ export async function resolveQuotaProviderApiKey(
     configJsoncSource: "opencode.jsonc",
     getConfigCandidates: getGlobalOpencodeConfigCandidatePaths,
     auth: {
-      readAuth: readAuthFile,
+      // Key logins only: `providerId` can name an integration with OAuth sign-ins
+      // (for example `opencode`), and resolving one could refresh its token for nothing.
+      readAuth: () => readAuthFile({ integrationIds: [source.providerId], methods: ["key"] }),
       authKeys: [source.providerId],
-      authSource: "auth.json",
+      authSource: "opencode.db",
     },
   });
 
@@ -117,7 +120,7 @@ export async function resolveQuotaProviderApiKey(
       envVarNames: source.apiKeyEnv ? [source.apiKeyEnv] : [],
       getConfigCandidates: getGlobalOpencodeConfigCandidatePaths,
     }),
-    authPaths: getAuthPaths(),
+    credentialDatabasePaths: getCredentialDatabasePaths(),
   };
 }
 
@@ -344,16 +347,18 @@ function resolveJsonV1Number(
   if (resolution.state !== "value") {
     return { ok: false, issue: jsonV1ResolutionIssue(resolution) };
   }
-  if (typeof resolution.value !== "number" || !Number.isFinite(resolution.value)) {
+  // Some APIs write numbers as text (`"95.50"`); only a plain decimal is read as a number.
+  const raw =
+    typeof resolution.value === "string" && JSON_V1_DECIMAL_TEXT_RE.test(resolution.value.trim())
+      ? Number(resolution.value.trim())
+      : resolution.value;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
     return { ok: false, issue: "had wrong type" };
   }
-  if (Math.abs(resolution.value) > JSON_V1_MAX_NUMBER_MAGNITUDE) {
+  if (Math.abs(raw) > JSON_V1_MAX_NUMBER_MAGNITUDE) {
     return { ok: false, issue: "exceeded the numeric magnitude limit" };
   }
-  const value =
-    "path" in source && source.divideBy !== undefined
-      ? resolution.value / source.divideBy
-      : resolution.value;
+  const value = "path" in source && source.divideBy !== undefined ? raw / source.divideBy : raw;
   return Number.isFinite(value)
     ? { ok: true, value }
     : { ok: false, issue: "did not resolve to a finite number" };
@@ -681,7 +686,10 @@ function parseOpenRouterKeyV1(
     (limit !== null &&
       limit !== undefined &&
       (typeof limit !== "number" || !Number.isFinite(limit) || limit < 0)) ||
-    (remaining !== undefined && (typeof remaining !== "number" || !Number.isFinite(remaining)))
+    (remaining === null && limit !== null) ||
+    (remaining !== null &&
+      remaining !== undefined &&
+      (typeof remaining !== "number" || !Number.isFinite(remaining)))
   ) {
     return { success: false, error: "Invalid openrouter-key-v1 response" };
   }
@@ -695,6 +703,7 @@ function parseOpenRouterKeyV1(
       };
     }
     const percentRemaining = (remainingValue / limit) * 100;
+    const usedUsd = typeof remaining === "number" ? limit - remainingValue : usage;
     return {
       success: true,
       entries: [
@@ -704,7 +713,7 @@ function parseOpenRouterKeyV1(
           name: `${source.label} budget`,
           group: source.label,
           label: "Budget:",
-          right: `${formatUsd(usage)}/${formatUsd(limit)}`,
+          right: `${formatUsd(usedUsd)}/${formatUsd(limit)}`,
           percentRemaining,
         },
       ],

@@ -27,7 +27,7 @@ vi.mock("../src/lib/ollama-cloud-config.js", () => ({
   resolveOllamaCloudApiKey: mocks.resolveOllamaCloudApiKey,
 }));
 
-import { _parseOllamaCloudUsage, queryOllamaCloudQuota } from "../src/lib/ollama-cloud.js";
+import { _parseOllamaCloudBalance, queryOllamaCloudQuota } from "../src/lib/ollama-cloud.js";
 
 function mockResponse(params: {
   ok: boolean;
@@ -46,15 +46,36 @@ function mockResponse(params: {
   });
 }
 
-const usagePayload = {
-  limits: {
-    session: { usage: 0.25 },
-    weekly: { usage: 0.405 },
+// Credit-plan example from https://docs.ollama.com/api/balance.
+const creditPlanPayload = {
+  included: {
+    balance_usd: 72.5,
+    allowance_usd: 100,
+    period: {
+      from: "2026-09-15T09:30:00Z",
+      until: "2026-10-15T09:30:00Z",
+    },
   },
-  models: [
-    { model: "qwen3-coder:480b", requests: 12 },
-    { model: "deepseek-v3.1:671b", requests: 1 },
-  ],
+  purchased: {
+    balance_usd: 25,
+  },
+};
+
+// Legacy-plan example from https://docs.ollama.com/api/balance.
+const legacyPlanPayload = {
+  included: {
+    session: {
+      remaining_percent: 75,
+      resets_at: "2026-10-01T07:00:00Z",
+    },
+    weekly: {
+      remaining_percent: 40,
+      resets_at: "2026-10-05T00:00:00Z",
+    },
+  },
+  purchased: {
+    balance_usd: 25,
+  },
 };
 
 describe("queryOllamaCloudQuota", () => {
@@ -73,19 +94,19 @@ describe("queryOllamaCloudQuota", () => {
     expect(mocks.fetchWithTimeout).not.toHaveBeenCalled();
   });
 
-  it("sends the exact usage request with the raw Authorization value", async () => {
-    mockResponse({ ok: true, status: 200, json: usagePayload });
+  it("sends the exact balance request with a Bearer Authorization value", async () => {
+    mockResponse({ ok: true, status: 200, json: creditPlanPayload });
 
     await queryOllamaCloudQuota();
 
     expect(mocks.fetchWithTimeout).toHaveBeenCalledWith(
-      "https://ollama.com/api/usage",
+      "https://ollama.com/api/balance",
       expect.objectContaining({
         request: {
           method: "GET",
           headers: {
             Accept: "application/json",
-            Authorization: "ollama-secret-key",
+            Authorization: "Bearer ollama-secret-key",
           },
           redirect: "manual",
         },
@@ -93,12 +114,10 @@ describe("queryOllamaCloudQuota", () => {
         consume: expect.any(Function),
       }),
     );
-    const request = mocks.fetchWithTimeout.mock.calls[0]?.[1]?.request;
-    expect(request.headers.Authorization).not.toContain("Bearer ");
   });
 
   it("passes a configured request timeout", async () => {
-    mockResponse({ ok: true, status: 200, json: usagePayload });
+    mockResponse({ ok: true, status: 200, json: creditPlanPayload });
 
     await queryOllamaCloudQuota({ requestTimeoutMs: 1234 });
 
@@ -108,106 +127,158 @@ describe("queryOllamaCloudQuota", () => {
     );
   });
 
-  it("maps usage fractions and sorts model request counts", async () => {
-    mockResponse({ ok: true, status: 200, json: usagePayload });
+  it("maps included and purchased credits from a credit-plan response", async () => {
+    mockResponse({ ok: true, status: 200, json: creditPlanPayload });
 
-    await expect(queryOllamaCloudQuota()).resolves.toEqual({
+    const out = await queryOllamaCloudQuota();
+    expect(out).toEqual({
       success: true,
-      session: {
-        usageFraction: 0.25,
-        usagePercent: 25,
-        percentRemaining: 75,
+      includedCredits: {
+        balanceUsd: 72.5,
+        allowanceUsd: 100,
+        percentRemaining: 72.5,
+        resetTimeIso: "2026-10-15T09:30:00.000Z",
       },
-      weekly: {
-        usageFraction: 0.405,
-        usagePercent: 40.5,
-        percentRemaining: 59.5,
-      },
-      models: [
-        { model: "deepseek-v3.1:671b", requests: 1 },
-        { model: "qwen3-coder:480b", requests: 12 },
-      ],
+      purchasedUsd: 25,
     });
   });
 
-  it("preserves zero and fully-used fraction boundaries", () => {
+  it("maps session and weekly limits from a legacy-plan response", async () => {
+    mockResponse({ ok: true, status: 200, json: legacyPlanPayload });
+
+    const out = await queryOllamaCloudQuota();
+    expect(out).toEqual({
+      success: true,
+      session: { percentRemaining: 75, resetTimeIso: "2026-10-01T07:00:00.000Z" },
+      weekly: { percentRemaining: 40, resetTimeIso: "2026-10-05T00:00:00.000Z" },
+      purchasedUsd: 25,
+    });
+  });
+
+  it("clamps included credits to 0..100% and has no share for a zero allowance", () => {
     expect(
-      _parseOllamaCloudUsage({
-        limits: { session: { usage: 0 }, weekly: { usage: 1 } },
-        models: [],
+      _parseOllamaCloudBalance({
+        included: {
+          balance_usd: 150,
+          allowance_usd: 100,
+          period: { until: "2026-10-15T09:30:00Z" },
+        },
+        purchased: { balance_usd: 0 },
+      }),
+    ).toMatchObject({ success: true, includedCredits: { percentRemaining: 100 } });
+    expect(
+      _parseOllamaCloudBalance({
+        included: {
+          balance_usd: -5,
+          allowance_usd: 100,
+          period: { until: "2026-10-15T09:30:00Z" },
+        },
+        purchased: { balance_usd: 0 },
+      }),
+    ).toMatchObject({ success: true, includedCredits: { percentRemaining: 0 } });
+    expect(
+      _parseOllamaCloudBalance({
+        included: { balance_usd: 0, allowance_usd: 0, period: { until: "2026-10-15T09:30:00Z" } },
+        purchased: { balance_usd: 25 },
       }),
     ).toEqual({
       success: true,
-      session: { usageFraction: 0, usagePercent: 0, percentRemaining: 100 },
-      weekly: { usageFraction: 1, usagePercent: 100, percentRemaining: 0 },
-      models: [],
+      includedCredits: {
+        balanceUsd: 0,
+        allowanceUsd: 0,
+        resetTimeIso: "2026-10-15T09:30:00.000Z",
+      },
+      purchasedUsd: 25,
     });
   });
 
-  it("keeps valid rows and reports invalid independent rows", () => {
-    const out = _parseOllamaCloudUsage({
-      limits: {
-        session: { usage: 0.2 },
-        weekly: { usage: 1.5 },
+  it("keeps a limit without a reset time when resets_at is not a time", () => {
+    expect(
+      _parseOllamaCloudBalance({
+        included: {
+          session: { remaining_percent: 0, resets_at: "soon" },
+          weekly: { remaining_percent: 100 },
+        },
+        purchased: { balance_usd: 0 },
+      }),
+    ).toEqual({
+      success: true,
+      session: { percentRemaining: 0 },
+      weekly: { percentRemaining: 100 },
+      purchasedUsd: 0,
+    });
+  });
+
+  it("reports invalid independent fields and keeps the valid ones", () => {
+    const out = _parseOllamaCloudBalance({
+      included: {
+        session: { remaining_percent: 20, resets_at: "2026-10-01T07:00:00Z" },
+        weekly: { remaining_percent: 150, resets_at: "2026-10-05T00:00:00Z" },
       },
-      models: [
-        { model: "valid-model", requests: 0 },
-        { model: "negative", requests: -1 },
-        { model: "decimal", requests: 1.5 },
-        { model: "valid-model", requests: 3 },
-        { model: "  unsafe\nmodel\u202e\u001b[31m  ", requests: 2 },
-        null,
-      ],
+      purchased: { balance_usd: "25" },
     });
 
-    expect(out).toMatchObject({
+    expect(out).toEqual({
       success: true,
-      session: { usageFraction: 0.2, usagePercent: 20, percentRemaining: 80 },
-      models: [
-        { model: "unsafe model", requests: 2 },
-        { model: "valid-model", requests: 0 },
+      session: { percentRemaining: 20, resetTimeIso: "2026-10-01T07:00:00.000Z" },
+      rowErrors: [
+        "Weekly: ignored invalid remaining percent",
+        "Purchased credits: ignored invalid balance",
       ],
     });
-    expect(out && out.success ? out.rowErrors : []).toEqual([
-      "Weekly: ignored invalid usage fraction",
-      "Models: ignored invalid request count for negative",
-      "Models: ignored invalid request count for decimal",
-      "Models: ignored duplicate model valid-model",
-      "Models: ignored an invalid row",
-    ]);
+  });
+
+  it("reports invalid included credits and an unknown included shape", () => {
+    expect(
+      _parseOllamaCloudBalance({
+        included: { balance_usd: 10, allowance_usd: -1 },
+        purchased: { balance_usd: 25 },
+      }),
+    ).toEqual({
+      success: true,
+      purchasedUsd: 25,
+      rowErrors: ["Included credits: ignored invalid balance"],
+    });
+    expect(
+      _parseOllamaCloudBalance({ included: { monthly: {} }, purchased: { balance_usd: 25 } }),
+    ).toEqual({
+      success: true,
+      purchasedUsd: 25,
+      rowErrors: ["Included: expected credits or session and weekly limits"],
+    });
+    expect(_parseOllamaCloudBalance({ purchased: { balance_usd: 25 } })).toEqual({
+      success: true,
+      purchasedUsd: 25,
+      rowErrors: ["Included: expected an object"],
+    });
   });
 
   it.each([null, [], "invalid"])("rejects an invalid root payload: %j", (payload) => {
-    expect(_parseOllamaCloudUsage(payload)).toEqual({
+    expect(_parseOllamaCloudBalance(payload)).toEqual({
       success: false,
-      error: "Ollama Cloud usage API returned an unexpected response shape",
+      error: "Ollama Cloud balance API returned an unexpected response shape",
     });
   });
 
-  it("rejects more than 100 model rows", () => {
-    expect(
-      _parseOllamaCloudUsage({
-        limits: { session: { usage: 0.1 } },
-        models: Array.from({ length: 101 }, (_, index) => ({
-          model: `model-${index}`,
-          requests: index,
-        })),
-      }),
-    ).toEqual({
+  it.each([
+    ["an empty object", {}],
+    // The retired /api/usage limits shape.
+    ["the old usage shape", { limits: { session: { usage: 0.25 }, weekly: { usage: 0.4 } } }],
+    [
+      "the new usage shape",
+      { range: "7d", scope: "self", granularity: "day", totals: { request_count: 3 }, buckets: [] },
+    ],
+    [
+      "only invalid fields",
+      {
+        included: { session: { remaining_percent: -1 }, weekly: { remaining_percent: Number.NaN } },
+        purchased: { balance_usd: -2 },
+      },
+    ],
+  ])("rejects a reply with no limits or balance: %s", (_name, payload) => {
+    expect(_parseOllamaCloudBalance(payload)).toEqual({
       success: false,
-      error: "Ollama Cloud usage API returned more than 100 model rows",
-    });
-  });
-
-  it("rejects an object with no usable usage data", () => {
-    expect(
-      _parseOllamaCloudUsage({
-        limits: { session: { usage: -1 }, weekly: { usage: Number.NaN } },
-        models: [{ model: "bad", requests: -1 }],
-      }),
-    ).toEqual({
-      success: false,
-      error: "Ollama Cloud usage API returned no usable usage data",
+      error: "Ollama Cloud balance API returned no limits or balance",
     });
   });
 
@@ -221,7 +292,7 @@ describe("queryOllamaCloudQuota", () => {
     const out = await queryOllamaCloudQuota();
     const error = out && !out.success ? out.error : "";
 
-    expect(error).toBe("Ollama Cloud usage API error 401: Unauthorized [redacted]");
+    expect(error).toBe("Ollama Cloud balance API error 401: Unauthorized [redacted]");
     expect(error).not.toContain("ollama-secret-key");
     expect(error).not.toContain("\u001b");
   });
@@ -235,7 +306,7 @@ describe("queryOllamaCloudQuota", () => {
 
     const out = await queryOllamaCloudQuota();
     expect(out && !out.success ? out.error : "").toBe(
-      "Ollama Cloud usage API response exceeded 262144 bytes",
+      "Ollama Cloud balance API response exceeded 262144 bytes",
     );
   });
 

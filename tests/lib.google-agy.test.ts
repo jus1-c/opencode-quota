@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
   const fetchResponse = vi.fn();
@@ -24,6 +27,18 @@ const mocks = vi.hoisted(() => {
     inspectAgyCompanionPresence: vi.fn(),
     resolveAgyClientCredentials: vi.fn(),
     clearAgyCompanionCacheForTests: vi.fn(),
+    deriveResolvedAuthIdentity: vi.fn(
+      async (params: {
+        providerId: string;
+        principal: { kind: string };
+        qualifiers?: readonly string[];
+      }) =>
+        `identity:${params.providerId}:${params.principal.kind}:${(params.qualifiers ?? []).length}`,
+    ),
+    composeResolvedAuthIdentities: vi.fn(
+      async (params: { providerId: string; identities: readonly string[] }) =>
+        `composed:${params.providerId}:${params.identities.join("|")}`,
+    ),
   };
 });
 
@@ -41,6 +56,11 @@ vi.mock("../src/lib/google-token-cache.js", () => ({
   setCachedAccessToken: mocks.setCachedAccessToken,
 }));
 
+vi.mock("../src/lib/resolved-auth-identity.js", () => ({
+  deriveResolvedAuthIdentity: mocks.deriveResolvedAuthIdentity,
+  composeResolvedAuthIdentities: mocks.composeResolvedAuthIdentities,
+}));
+
 vi.mock("../src/lib/google-agy-companion.js", () => ({
   inspectAgyCompanionPresence: mocks.inspectAgyCompanionPresence,
   resolveAgyClientCredentials: mocks.resolveAgyClientCredentials,
@@ -53,6 +73,7 @@ import {
   queryGoogleAgyQuota,
   resolveAgyAccounts,
   resolveAgyConfiguredProjectId,
+  resolveGoogleAgyAuthIdentity,
 } from "../src/lib/google-agy.js";
 
 function mockJsonResponse(data: unknown, status = 200) {
@@ -132,7 +153,15 @@ function authAccount(
 }
 
 describe("google agy logic", () => {
+  let configDir: string;
+
+  function writeGlobalConfig(config: unknown) {
+    writeFileSync(join(configDir, "opencode.json"), JSON.stringify(config));
+  }
+
   beforeEach(() => {
+    configDir = mkdtempSync(join(tmpdir(), "opencode-quota-agy-config-"));
+    vi.stubEnv("OPENCODE_CONFIG_DIR", configDir);
     vi.clearAllMocks();
     mocks.readAuthFileCached.mockResolvedValue(null);
     mocks.fetchResponse.mockResolvedValue(mockJsonResponse({ groups: [] }));
@@ -151,6 +180,63 @@ describe("google agy logic", () => {
     delete process.env.GOOGLE_CLOUD_PROJECT_ID;
   });
 
+  afterEach(() => {
+    rmSync(configDir, { recursive: true, force: true });
+  });
+
+  it("composes ordered account and winning companion identities without exposing them", async () => {
+    mocks.readAuthFileCached.mockResolvedValue({
+      "google-agy": authAccount("refresh-one", "project-one", "alice@example.com"),
+      "opencode-agy-auth": authAccount(
+        "refresh-one",
+        "project-one",
+        "ignored-duplicate@example.com",
+      ),
+      "google-agy-auth": authAccount("refresh-two", "project-two"),
+    });
+
+    const resolved = await resolveGoogleAgyAuthIdentity();
+
+    expect(resolved).toContain("composed:google-agy:");
+    expect(mocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
+      providerId: "google-agy",
+      principal: { kind: "credential", value: "refresh-one" },
+      qualifiers: ["project-one"],
+    });
+    expect(mocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
+      providerId: "google-agy",
+      principal: { kind: "credential", value: "refresh-two" },
+      qualifiers: ["project-two"],
+    });
+    expect(mocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
+      providerId: "google-agy:companion",
+      principal: { kind: "credential", value: "client-secret" },
+      qualifiers: ["client-id"],
+    });
+    expect(mocks.composeResolvedAuthIdentities).toHaveBeenCalledOnce();
+    expect(JSON.stringify({ resolved })).not.toContain("ignored-duplicate@example.com");
+  });
+
+  it("separates credentials that share the same advisory email and project", async () => {
+    mocks.readAuthFileCached.mockResolvedValue({
+      "google-agy": authAccount("refresh-one", "shared-project", "shared@example.com"),
+      "opencode-agy-auth": authAccount("refresh-two", "shared-project", "shared@example.com"),
+    });
+
+    await resolveGoogleAgyAuthIdentity();
+
+    expect(mocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
+      providerId: "google-agy",
+      principal: { kind: "credential", value: "refresh-one" },
+      qualifiers: ["shared-project"],
+    });
+    expect(mocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
+      providerId: "google-agy",
+      principal: { kind: "credential", value: "refresh-two" },
+      qualifiers: ["shared-project"],
+    });
+  });
+
   it("parses packed refresh strings", () => {
     expect(parseAgyRefreshParts("refresh-token|project-1|managed-project")).toEqual({
       refreshToken: "refresh-token",
@@ -163,34 +249,28 @@ describe("google agy logic", () => {
     process.env.GOOGLE_CLOUD_PROJECT = "generic-gcp-project";
     await expect(resolveAgyConfiguredProjectId()).resolves.toBe("generic-gcp-project");
 
-    await expect(
-      resolveAgyConfiguredProjectId({
-        config: {
-          get: async () => ({
-            data: {
-              provider: {
-                "google-agy": { options: { projectId: "configured-agy-project" } },
-              },
-            },
-          }),
-        },
-      }),
-    ).resolves.toBe("configured-agy-project");
+    writeGlobalConfig({
+      provider: { "google-agy": { options: { projectId: "configured-agy-project" } } },
+    });
+    await expect(resolveAgyConfiguredProjectId()).resolves.toBe("configured-agy-project");
 
     process.env.OPENCODE_AGY_PROJECT_ID = "explicit-agy-project";
-    await expect(
-      resolveAgyConfiguredProjectId({
-        config: {
-          get: async () => ({
-            data: {
-              provider: {
-                "google-agy": { options: { projectId: "configured-agy-project" } },
-              },
-            },
-          }),
-        },
-      }),
-    ).resolves.toBe("explicit-agy-project");
+    await expect(resolveAgyConfiguredProjectId()).resolves.toBe("explicit-agy-project");
+  });
+
+  it("reads the project id from OpenCode 2 native provider settings", async () => {
+    writeGlobalConfig({
+      providers: { "google-agy": { settings: { projectId: "native-agy-project" } } },
+    });
+    await expect(resolveAgyConfiguredProjectId()).resolves.toBe("native-agy-project");
+  });
+
+  it("lets a native providers entry replace the legacy provider entry", async () => {
+    writeGlobalConfig({
+      provider: { "google-agy": { options: { projectId: "legacy-agy-project" } } },
+      providers: { "google-agy": { settings: { projectId: "native-agy-project" } } },
+    });
+    await expect(resolveAgyConfiguredProjectId()).resolves.toBe("native-agy-project");
   });
 
   it("preserves auth-key order, project precedence, and duplicate suppression", () => {
@@ -280,7 +360,7 @@ describe("google agy logic", () => {
     });
     mocks.fetchResponse.mockResolvedValueOnce(mockJsonResponse(summaryResponse()));
 
-    const result = await queryGoogleAgyQuota(undefined, { requestTimeoutMs: 12_345 });
+    const result = await queryGoogleAgyQuota({ requestTimeoutMs: 12_345 });
     expect(result).toMatchObject({ success: true });
 
     expect(mocks.fetchWithTimeout).toHaveBeenCalledWith(
@@ -291,7 +371,7 @@ describe("google agy logic", () => {
           headers: {
             "Content-Type": "application/json",
             Authorization: "Bearer cached-access-token",
-            "User-Agent": "antigravity/cli/1.0.3 darwin/amd64",
+            "User-Agent": "antigravity/cli/1.3.5 darwin/amd64",
             "x-activity-request-id": expect.any(String),
           },
           body: JSON.stringify({ project: "project-1" }),
@@ -353,7 +433,7 @@ describe("google agy logic", () => {
     expect(result.buckets.every((bucket) => bucket.accountEmail === "alice@example.com")).toBe(
       true,
     );
-    expect(result.buckets.every((bucket) => bucket.accountKey.length === 64)).toBe(true);
+    expect(JSON.stringify(result.buckets)).not.toContain("accountKey");
     expect(result.buckets.every((bucket) => bucket.sourceKey === "google-agy")).toBe(true);
   });
 

@@ -22,6 +22,7 @@ import {
   type QuotaRuntimeClient,
   resolveQuotaRuntimeContext,
 } from "../src/lib/quota-runtime-context.js";
+import { buildQuotaProviderStateCacheKey } from "../src/lib/quota-state.js";
 import { __resetQuotaTelemetryForTests } from "../src/lib/quota-telemetry.js";
 import { createRuntimeProviderIdResolver } from "../src/lib/runtime-provider-ids.js";
 import { DEFAULT_CONFIG } from "../src/lib/types.js";
@@ -146,29 +147,23 @@ describe("quota runtime context", () => {
     expect(runtime.configMeta.settingSources.enabled).toBe(worktreeConfigPath);
   });
 
-  it("does not re-resolve OPENCODE_CONFIG_DIR when loadConfig receives resolved configRootDir", async () => {
-    process.env.OPENCODE_CONFIG_DIR = ".opencode";
-    mkdirSync(join(worktreeDir, ".opencode", ".opencode"), { recursive: true });
+  it("uses OPENCODE_CONFIG_DIR as the global config dir and keeps the worktree config root", async () => {
+    const customGlobalDir = join(tempDir, "custom-global");
+    process.env.OPENCODE_CONFIG_DIR = customGlobalDir;
+    mkdirSync(customGlobalDir, { recursive: true });
     writeFileSync(
-      join(worktreeDir, ".opencode", "opencode.json"),
-      JSON.stringify({
-        experimental: {
-          quotaToast: {
-            enabled: false,
-          },
-        },
-      }),
+      join(customGlobalDir, "opencode.json"),
+      JSON.stringify({ experimental: { quotaToast: { enabled: false } } }),
       "utf8",
     );
     writeFileSync(
-      join(worktreeDir, ".opencode", ".opencode", "opencode.json"),
-      JSON.stringify({
-        experimental: {
-          quotaToast: {
-            enabled: true,
-          },
-        },
-      }),
+      join(xdgConfigHome, "opencode", "opencode.json"),
+      JSON.stringify({ experimental: { quotaToast: { minIntervalMs: 12_345 } } }),
+      "utf8",
+    );
+    writeFileSync(
+      join(worktreeDir, "opencode.json"),
+      JSON.stringify({ experimental: { quotaToast: { formatStyle: "allWindows" } } }),
       "utf8",
     );
 
@@ -182,18 +177,15 @@ describe("quota runtime context", () => {
       providers: [],
     });
 
-    expect(runtime.roots).toEqual({
-      workspaceRoot: worktreeDir,
-      configRoot: join(worktreeDir, ".opencode"),
-    });
+    expect(runtime.roots).toEqual({ workspaceRoot: worktreeDir, configRoot: worktreeDir });
     expect(runtime.config.enabled).toBe(false);
-    expect(runtime.configMeta.paths).toContain(quotaConfigSource(join(worktreeDir, ".opencode")));
-    expect(runtime.configMeta.paths).not.toContain(
-      quotaConfigSource(join(worktreeDir, ".opencode", ".opencode")),
-    );
+    expect(runtime.config.formatStyle).toBe("allWindows");
+    expect(runtime.config.minIntervalMs).not.toBe(12_345);
+    expect(runtime.configMeta.globalConfigPaths).toEqual([quotaConfigSource(customGlobalDir)]);
+    expect(runtime.configMeta.workspaceConfigPaths).toEqual([quotaConfigSource(worktreeDir)]);
   });
 
-  it("propagates request timeout config and explicit-source state to provider context", () => {
+  it("propagates provider config but keeps accounting detail out of provider and cache context", () => {
     const configMeta = createLoadConfigMeta();
     configMeta.settingSources.requestTimeoutMs = "test config";
 
@@ -203,6 +195,7 @@ describe("quota runtime context", () => {
       resolveRuntimeProviderIds: createRuntimeProviderIdResolver(client),
       config: {
         ...DEFAULT_CONFIG,
+        accountingDetail: "detailed",
         requestTimeoutMs: 12000,
       },
       configMeta,
@@ -210,8 +203,21 @@ describe("quota runtime context", () => {
     });
 
     expect(providerContext.config?.requestTimeoutMs).toBe(12000);
+    expect(providerContext.config).not.toHaveProperty("accountingDetail");
+    expect(providerContext.config).not.toHaveProperty("opencodeZenDisplay");
     expect(providerContext.config?.providerCacheTtlMs).toBe(DEFAULT_CONFIG.minIntervalMs);
     expect(providerContext.config?.requestTimeoutMsConfigured).toBe(true);
+
+    const summaryContext = createQuotaProviderRuntimeContext({
+      client,
+      resolveRuntimeProviderIds: createRuntimeProviderIdResolver(client),
+      config: { ...DEFAULT_CONFIG, accountingDetail: "summary", requestTimeoutMs: 12000 },
+      configMeta,
+      session: {},
+    });
+    expect(buildQuotaProviderStateCacheKey("openai", providerContext)).toBe(
+      buildQuotaProviderStateCacheKey("openai", summaryContext),
+    );
   });
 
   it("scopes telemetry tokens to enabled normalized provider configuration without I/O", () => {

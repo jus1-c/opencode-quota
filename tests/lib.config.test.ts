@@ -4,21 +4,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type ConfigLoaderWorkspace,
   createConfigLoaderWorkspace,
-  createEmptyRuntimeDirCandidates,
+  createUnusedRuntimeDirs,
   quotaSidecarConfigSource,
 } from "./helpers/config-loader-test-harness.js";
 
 const runtimeDirs = vi.hoisted(() => ({
   value: {
-    dataDirs: [] as string[],
-    configDirs: [] as string[],
-    cacheDirs: [] as string[],
-    stateDirs: [] as string[],
+    dataDir: "",
+    configDir: "",
+    cacheDir: "",
+    stateDir: "",
   },
 }));
 
 vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
-  getOpencodeRuntimeDirCandidates: () => runtimeDirs.value,
+  getOpencodeRuntimeDirs: () => runtimeDirs.value,
 }));
 
 import { createLoadConfigMeta, loadConfig } from "../src/lib/config.js";
@@ -34,7 +34,7 @@ describe("loadConfig", () => {
     delete process.env.OPENCODE_CONFIG_DIR;
     workspace = createConfigLoaderWorkspace("opencode-quota-config-sdk-");
     isolatedCwd = workspace.workspaceDir;
-    runtimeDirs.value = createEmptyRuntimeDirCandidates();
+    runtimeDirs.value = createUnusedRuntimeDirs(workspace.tempDir);
   });
 
   afterEach(() => {
@@ -65,18 +65,18 @@ describe("loadConfig", () => {
 
   it("defaults and validates native TUI command display with provenance", async () => {
     const defaults = await loadSdkConfig({});
-    expect(defaults.config.tuiCommandDisplay).toBe("inline");
+    expect(defaults.config.tuiCommandDisplay).toBe("dialog");
     expect(defaults.meta.settingSources).toEqual({});
 
-    const dialog = await loadSdkConfig({ tuiCommandDisplay: "dialog" });
-    expect(dialog.config.tuiCommandDisplay).toBe("dialog");
-    expect(dialog.meta.settingSources).toEqual({
+    const inline = await loadSdkConfig({ tuiCommandDisplay: "inline" });
+    expect(inline.config.tuiCommandDisplay).toBe("inline");
+    expect(inline.meta.settingSources).toEqual({
       tuiCommandDisplay: "client.config.get",
     });
-    expect(dialog.meta.configIssues).toEqual([]);
+    expect(inline.meta.configIssues).toEqual([]);
 
     const invalid = await loadSdkConfig({ tuiCommandDisplay: "both" });
-    expect(invalid.config.tuiCommandDisplay).toBe("inline");
+    expect(invalid.config.tuiCommandDisplay).toBe("dialog");
     expect(invalid.meta.settingSources).toEqual({});
     expect(invalid.meta.configIssues).toEqual([
       {
@@ -86,10 +86,110 @@ describe("loadConfig", () => {
       },
     ]);
 
-    const removedKey = await loadSdkConfig({ tuiQuotaCommandDisplay: "dialog" });
-    expect(removedKey.config.tuiCommandDisplay).toBe("inline");
+    const removedKey = await loadSdkConfig({ tuiQuotaCommandDisplay: "inline" });
+    expect(removedKey.config.tuiCommandDisplay).toBe("dialog");
     expect(removedKey.meta.settingSources).toEqual({});
     expect(removedKey.meta.configIssues).toEqual([]);
+  });
+
+  it("loads accounting detail with provenance and diagnoses the removed Zen key without translating it", async () => {
+    const defaults = await loadSdkConfig({});
+    expect(defaults.config.accountingDetail).toBe("summary");
+    expect(defaults.meta.settingSources).toEqual({});
+
+    for (const accountingDetail of ["summary", "detailed"] as const) {
+      const configured = await loadSdkConfig({ accountingDetail });
+      expect(configured.config.accountingDetail).toBe(accountingDetail);
+      expect(configured.meta.settingSources).toEqual({
+        accountingDetail: "client.config.get",
+      });
+      expect(configured.meta.networkSettingSources).toEqual({});
+      expect(configured.meta.configIssues).toEqual([]);
+    }
+
+    const invalid = await loadSdkConfig({ accountingDetail: "default" });
+    expect(invalid.config.accountingDetail).toBe("summary");
+    expect(invalid.meta.settingSources).toEqual({});
+    expect(invalid.meta.configIssues).toEqual([
+      {
+        path: "client.config.get",
+        key: "accountingDetail",
+        message: 'expected "summary" or "detailed"',
+      },
+    ]);
+
+    for (const opencodeZenDisplay of ["default", "detailed", "expanded"]) {
+      const removed = await loadSdkConfig({ opencodeZenDisplay });
+      expect(removed.config.accountingDetail).toBe("summary");
+      expect(removed.meta.settingSources).toEqual({});
+      expect(removed.meta.networkSettingSources).toEqual({});
+      expect(removed.meta.configIssues).toEqual([
+        {
+          path: "client.config.get",
+          key: "opencodeZenDisplay",
+          message: 'removed; use root "accountingDetail" ("summary" or "detailed")',
+        },
+      ]);
+    }
+
+    const explicitReplacementInput = {
+      accountingDetail: "detailed",
+      opencodeZenDisplay: "default",
+    };
+    const explicitReplacement = await loadSdkConfig(explicitReplacementInput);
+    expect(explicitReplacement.config.accountingDetail).toBe("detailed");
+    expect(explicitReplacement.meta.settingSources).toEqual({
+      accountingDetail: "client.config.get",
+    });
+    expect(explicitReplacement.meta.configIssues).toHaveLength(1);
+    expect(explicitReplacementInput).toEqual({
+      accountingDetail: "detailed",
+      opencodeZenDisplay: "default",
+    });
+  });
+
+  it("defaults and validates quota reset notifications with provenance", async () => {
+    const defaults = await loadSdkConfig({});
+    expect(defaults.config.resetNotifications).toEqual({
+      enabled: false,
+      windows: ["weekly"],
+    });
+
+    const configured = await loadSdkConfig({
+      resetNotifications: {
+        enabled: true,
+        windows: ["weekly", "monthly", "weekly"],
+      },
+    });
+    expect(configured.config.resetNotifications).toEqual({
+      enabled: true,
+      windows: ["weekly", "monthly"],
+    });
+    expect(configured.meta.settingSources).toEqual({
+      "resetNotifications.enabled": "client.config.get",
+      "resetNotifications.windows": "client.config.get",
+    });
+    expect(configured.meta.networkSettingSources).toEqual({});
+
+    const invalid = await loadSdkConfig({
+      resetNotifications: { enabled: "yes", windows: ["rolling"] },
+    });
+    expect(invalid.config.resetNotifications).toEqual({
+      enabled: false,
+      windows: ["weekly"],
+    });
+    expect(invalid.meta.configIssues).toEqual([
+      {
+        path: "client.config.get",
+        key: "resetNotifications.enabled",
+        message: "expected boolean",
+      },
+      {
+        path: "client.config.get",
+        key: "resetNotifications.windows",
+        message: "expected a non-empty array of: fiveHour, hourly, daily, weekly, monthly, yearly",
+      },
+    ]);
   });
 
   it("defaults and validates session token scope with provenance", async () => {
@@ -133,15 +233,18 @@ describe("loadConfig", () => {
       maintainerAnnouncements: {
         enabled: false,
         home: false,
+        homeFrequency: "always",
       },
     });
     expect(explicit.config.maintainerAnnouncements).toEqual({
       enabled: false,
       home: false,
+      homeFrequency: "always",
     });
     expect(explicit.meta.settingSources).toEqual({
       "maintainerAnnouncements.enabled": "client.config.get",
       "maintainerAnnouncements.home": "client.config.get",
+      "maintainerAnnouncements.homeFrequency": "client.config.get",
     });
     expect(explicit.meta.networkSettingSources).toEqual({});
 
@@ -149,6 +252,7 @@ describe("loadConfig", () => {
       maintainerAnnouncements: {
         enabled: true,
         home: "no",
+        homeFrequency: "hourly",
       },
     });
     expect(partialInvalid.config.maintainerAnnouncements).toEqual({
@@ -238,6 +342,26 @@ describe("loadConfig", () => {
     expect(withInvalidFormatStyle.config.tuiSidebarPanel).toEqual(DEFAULT_CONFIG.tuiSidebarPanel);
     expect(withInvalidFormatStyle.meta.settingSources).toEqual({});
 
+    const validPreferredWindows = ["rolling", "weekly", "monthly"] as const;
+    for (const opencodeGoPreferredWindow of validPreferredWindows) {
+      const preferred = await loadSdkConfig({
+        tuiSidebarPanel: { opencodeGoPreferredWindow },
+      });
+      expect(preferred.config.tuiSidebarPanel).toEqual({
+        ...DEFAULT_CONFIG.tuiSidebarPanel,
+        opencodeGoPreferredWindow,
+      });
+      expect(preferred.meta.settingSources).toEqual({
+        "tuiSidebarPanel.opencodeGoPreferredWindow": "client.config.get",
+      });
+    }
+
+    const invalidPreferred = await loadSdkConfig({
+      tuiSidebarPanel: { opencodeGoPreferredWindow: "daily" },
+    });
+    expect(invalidPreferred.config.tuiSidebarPanel).toEqual(DEFAULT_CONFIG.tuiSidebarPanel);
+    expect(invalidPreferred.meta.settingSources).toEqual({});
+
     const withLegacyToastStyle = await loadSdkConfig({
       tuiSidebarPanel: {
         toastStyle: "allWindows",
@@ -257,7 +381,6 @@ describe("loadConfig", () => {
         enabled: true,
         homeBottom: false,
         sessionPrompt: false,
-        suppressWhenNativeProviderQuota: false,
         maxWidth: 72,
       },
     });
@@ -265,14 +388,12 @@ describe("loadConfig", () => {
       enabled: true,
       homeBottom: false,
       sessionPrompt: false,
-      suppressWhenNativeProviderQuota: false,
       maxWidth: 72,
     });
     expect(explicit.meta.settingSources).toEqual({
       "tuiCompactStatus.enabled": "client.config.get",
       "tuiCompactStatus.homeBottom": "client.config.get",
       "tuiCompactStatus.sessionPrompt": "client.config.get",
-      "tuiCompactStatus.suppressWhenNativeProviderQuota": "client.config.get",
       "tuiCompactStatus.maxWidth": "client.config.get",
     });
     expect(explicit.meta.networkSettingSources).toEqual({});
@@ -282,7 +403,6 @@ describe("loadConfig", () => {
         enabled: true,
         homeBottom: "no",
         sessionPrompt: null,
-        suppressWhenNativeProviderQuota: 0,
         maxWidth: -1,
       },
     });
@@ -335,30 +455,59 @@ describe("loadConfig", () => {
     expect(withLegacyCompactToastStyle.meta.settingSources).toEqual({});
   });
 
+  it("defaults tuiPromptBar off and accepts validated opt-in overrides", async () => {
+    const defaults = await loadSdkConfig({});
+    expect(defaults.config.tuiPromptBar).toEqual({ enabled: false });
+    expect(defaults.config.tuiPromptBar).not.toBe(DEFAULT_CONFIG.tuiPromptBar);
+
+    const enabled = await loadSdkConfig({ tuiPromptBar: { enabled: true } });
+    expect(enabled.config.tuiPromptBar).toEqual({ enabled: true });
+    expect(enabled.meta.settingSources).toEqual({
+      "tuiPromptBar.enabled": "client.config.get",
+    });
+
+    const disabled = await loadSdkConfig({ tuiPromptBar: { enabled: false } });
+    expect(disabled.config.tuiPromptBar).toEqual({ enabled: false });
+    expect(disabled.meta.settingSources).toEqual({
+      "tuiPromptBar.enabled": "client.config.get",
+    });
+
+    const invalidValue = await loadSdkConfig({ tuiPromptBar: { enabled: "yes" } });
+    expect(invalidValue.config.tuiPromptBar).toEqual({ enabled: false });
+    expect(invalidValue.meta.settingSources).toEqual({});
+
+    const invalidNested = await loadSdkConfig({ tuiPromptBar: true });
+    expect(invalidNested.config.tuiPromptBar).toEqual({ enabled: false });
+    expect(invalidNested.meta.settingSources).toEqual({});
+  });
+
   it("deep-clones default config when no config source exists", async () => {
     const meta = createLoadConfigMeta();
     const first = await loadConfig(undefined, meta, { cwd: isolatedCwd });
     first.tuiSidebarPanel.enabled = false;
     first.tuiCompactStatus.enabled = true;
     first.tuiCompactStatus.maxWidth = 1;
+    first.tuiPromptBar.enabled = true;
     first.maintainerAnnouncements.enabled = false;
     first.maintainerAnnouncements.home = false;
 
     const second = await loadConfig(undefined, undefined, { cwd: isolatedCwd });
     expect(second.tuiSidebarPanel).toEqual(DEFAULT_CONFIG.tuiSidebarPanel);
     expect(second.tuiCompactStatus).toEqual(DEFAULT_CONFIG.tuiCompactStatus);
+    expect(second.tuiPromptBar).toEqual(DEFAULT_CONFIG.tuiPromptBar);
     expect(DEFAULT_CONFIG.tuiSidebarPanel).toEqual({ enabled: true });
     expect(DEFAULT_CONFIG.tuiCompactStatus).toEqual({
       enabled: false,
       homeBottom: true,
       sessionPrompt: true,
-      suppressWhenNativeProviderQuota: true,
       maxWidth: 96,
     });
+    expect(DEFAULT_CONFIG.tuiPromptBar).toEqual({ enabled: false });
     expect(second.maintainerAnnouncements).toEqual(DEFAULT_CONFIG.maintainerAnnouncements);
     expect(DEFAULT_CONFIG.maintainerAnnouncements).toEqual({
       enabled: true,
       home: true,
+      homeFrequency: "daily",
     });
   });
 
@@ -421,7 +570,9 @@ describe("loadConfig", () => {
     expect(explicit.meta.networkSettingSources).toEqual({});
   });
 
-  it("resolves relative OPENCODE_CONFIG_DIR against cwd for file loading", async () => {
+  it("keeps the workspace config root when OPENCODE_CONFIG_DIR is set, like OpenCode 2", async () => {
+    // OpenCode 2 uses OPENCODE_CONFIG_DIR as the global config dir (resolved by
+    // opencode-runtime-paths, mocked here); project config still comes from the workspace.
     process.env.OPENCODE_CONFIG_DIR = ".opencode";
     mkdirSync(join(isolatedCwd, ".opencode"), { recursive: true });
     writeFileSync(
@@ -429,14 +580,20 @@ describe("loadConfig", () => {
       JSON.stringify({ experimental: { quotaToast: { enabled: false } } }),
       "utf8",
     );
+    writeFileSync(
+      join(isolatedCwd, "opencode.json"),
+      JSON.stringify({ experimental: { quotaToast: { minIntervalMs: 12_345 } } }),
+      "utf8",
+    );
 
     const meta = createLoadConfigMeta();
     const config = await loadConfig(undefined, meta, { cwd: isolatedCwd });
 
-    expect(config.enabled).toBe(false);
-    expect(meta.paths).toContain(
-      `${join(isolatedCwd, ".opencode", "opencode.json")} (experimental.quotaToast)`,
-    );
+    expect(config.enabled).toBe(true);
+    expect(config.minIntervalMs).toBe(12_345);
+    expect(meta.workspaceConfigPaths).toEqual([
+      `${join(isolatedCwd, "opencode.json")} (experimental.quotaToast)`,
+    ]);
   });
 
   it("ignores invalid OpenCode Go windows without recording a setting source", async () => {
@@ -711,6 +868,45 @@ describe("loadConfig", () => {
     expect(invalid.config.percentDisplayMode).toBe("remaining");
   });
 
+  it("defaults quotaProjection to off and accepts only runway", async () => {
+    const defaults = await loadSdkConfig({});
+    expect(defaults.config.quotaProjection).toBeUndefined();
+
+    const configured = await loadSdkConfig({ quotaProjection: "runway" });
+    expect(configured.config.quotaProjection).toBe("runway");
+    expect(configured.meta.settingSources).toEqual({
+      quotaProjection: "client.config.get",
+    });
+
+    for (const invalid of ["trend", true, 1, null]) {
+      const rejected = await loadSdkConfig({ quotaProjection: invalid });
+      expect(rejected.config.quotaProjection).toBeUndefined();
+      expect(rejected.meta.settingSources).not.toHaveProperty("quotaProjection");
+      expect(rejected.meta.configIssues).toEqual([
+        expect.objectContaining({ key: "quotaProjection", message: 'expected "runway"' }),
+      ]);
+    }
+  });
+
+  it("defaults percentLabelStyle to unset and accepts full or bare overrides", async () => {
+    const defaults = await loadSdkConfig({});
+    expect(defaults.config.percentLabelStyle).toBeUndefined();
+
+    for (const percentLabelStyle of ["full", "bare"] as const) {
+      const configured = await loadSdkConfig({ percentLabelStyle });
+      expect(configured.config.percentLabelStyle).toBe(percentLabelStyle);
+      expect(configured.meta.settingSources).toEqual({
+        percentLabelStyle: "client.config.get",
+      });
+    }
+
+    for (const invalid of ["minimal", 1, null, true]) {
+      const rejected = await loadSdkConfig({ percentLabelStyle: invalid });
+      expect(rejected.config.percentLabelStyle).toBeUndefined();
+      expect(rejected.meta.settingSources).not.toHaveProperty("percentLabelStyle");
+    }
+  });
+
   it("defaults resetTimeDecimals to unset and accepts integer 0..4 overrides", async () => {
     const defaults = await loadSdkConfig({});
     expect(defaults.config.resetTimeDecimals).toBeUndefined();
@@ -731,6 +927,59 @@ describe("loadConfig", () => {
       expect(rejected.config.resetTimeDecimals).toBeUndefined();
       expect(rejected.meta.settingSources).not.toHaveProperty("resetTimeDecimals");
     }
+  });
+
+  it("defaults resetTimeSpaced on and accepts boolean overrides", async () => {
+    const defaults = await loadSdkConfig({});
+    expect(defaults.config.resetTimeSpaced).toBe(true);
+
+    for (const resetTimeSpaced of [true, false]) {
+      const configured = await loadSdkConfig({ resetTimeSpaced });
+      expect(configured.config.resetTimeSpaced).toBe(resetTimeSpaced);
+      expect(configured.meta.settingSources).toEqual({
+        resetTimeSpaced: "client.config.get",
+      });
+    }
+
+    for (const invalid of ["true", 1, null]) {
+      const rejected = await loadSdkConfig({ resetTimeSpaced: invalid });
+      expect(rejected.config.resetTimeSpaced).toBe(true);
+      expect(rejected.meta.settingSources).not.toHaveProperty("resetTimeSpaced");
+    }
+  });
+
+  it("defaults waitForQuotaReset on and accepts boolean overrides", async () => {
+    const defaults = await loadSdkConfig({});
+    expect(defaults.config.waitForQuotaReset).toBe(true);
+    expect(defaults.meta.settingSources).not.toHaveProperty("waitForQuotaReset");
+
+    for (const waitForQuotaReset of [true, false]) {
+      const configured = await loadSdkConfig({ waitForQuotaReset });
+      expect(configured.config.waitForQuotaReset).toBe(waitForQuotaReset);
+      expect(configured.meta.settingSources).toEqual({
+        waitForQuotaReset: "client.config.get",
+      });
+    }
+
+    for (const invalid of ["true", 1, null]) {
+      const rejected = await loadSdkConfig({ waitForQuotaReset: invalid });
+      expect(rejected.config.waitForQuotaReset).toBe(true);
+      expect(rejected.meta.settingSources).not.toHaveProperty("waitForQuotaReset");
+    }
+  });
+
+  it("loads both display options together without changing reset decimals", async () => {
+    const configured = await loadSdkConfig({
+      percentLabelStyle: "bare",
+      resetTimeDecimals: 2,
+      resetTimeSpaced: true,
+    });
+
+    expect(configured.config).toMatchObject({
+      percentLabelStyle: "bare",
+      resetTimeDecimals: 2,
+      resetTimeSpaced: true,
+    });
   });
 
   it("defaults anthropicBinaryPath and trims explicit overrides", async () => {
@@ -849,7 +1098,6 @@ describe("loadConfig", () => {
       enabledProviders: ["nano-gpt"],
       pricingSnapshot: { source: "remote", autoRefresh: 2 },
       layout: { tinyAt: 28, maxWidth: 0 },
-      googleModels: [],
       toastStyle: "grouped",
     });
 
@@ -871,7 +1119,6 @@ describe("loadConfig", () => {
       "layout.tinyAt": "client.config.get",
     });
     expect(meta.settingSources).not.toHaveProperty("pricingSnapshot.source");
-    expect(meta.settingSources).not.toHaveProperty("googleModels");
     expect(meta.networkSettingSources).toEqual({
       enabledProviders: "client.config.get",
       "pricingSnapshot.autoRefresh": "client.config.get",

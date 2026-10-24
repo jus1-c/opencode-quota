@@ -7,6 +7,7 @@ import {
   TUI_SIDEBAR_LAYOUT,
   TUI_SIDEBAR_MAX_WIDTH,
 } from "../src/lib/tui-sidebar-format.js";
+import { DEFAULT_CONFIG } from "../src/lib/types.js";
 
 describe("buildSidebarQuotaPanelLines", () => {
   afterEach(() => {
@@ -64,6 +65,88 @@ describe("buildSidebarQuotaPanelLines", () => {
     expect(rendered).toContain(SESSION_TOKEN_SECTION_HEADING);
     expect(rendered).toContain("12 (5) in  34 out");
     expect(rendered).toContain("gpt-5");
+  });
+
+  it.each([
+    "allWindows",
+    "singleWindow",
+  ] as const)("stacks a value row too wide for its label instead of cutting it (%s)", (formatStyle) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-30T08:00:00.000Z"));
+    const lines = buildSidebarQuotaPanelLines({
+      config: { formatStyle, percentDisplayMode: "remaining" },
+      data: {
+        entries: [
+          {
+            kind: "value",
+            name: "Copilot",
+            group: "Copilot (business)",
+            label: "Plan:",
+            value: "business | usage needs billing token",
+            resetTimeIso: "2026-10-01T00:00:00.000Z",
+          },
+        ],
+        errors: [],
+      },
+    });
+
+    expect(lines.every((line) => line.length <= TUI_SIDEBAR_MAX_WIDTH)).toBe(true);
+    expect(lines.join(" ").replace(/\s+/gu, " ")).toContain("business | usage needs billing token");
+    expect(lines.some((line) => /^(Copilot|Plan)\b/u.test(line.trim()))).toBe(true);
+  });
+
+  it.each([
+    "allWindows",
+    "singleWindow",
+  ] as const)("renders a readable status with one header (%s)", (formatStyle) => {
+    const lines = buildSidebarQuotaPanelLines({
+      config: { formatStyle, percentDisplayMode: "remaining" },
+      data: {
+        entries: [
+          {
+            kind: "value",
+            name: "[OpenAI] (active)",
+            group: "[OpenAI] (active)",
+            value: "ChatGPT quota unavailable for API key",
+          },
+        ],
+        errors: [],
+      },
+    });
+
+    expect(lines.filter((line) => line === "[OpenAI] (active)")).toHaveLength(1);
+    expect(lines.every((line) => line.length <= TUI_SIDEBAR_MAX_WIDTH)).toBe(true);
+    expect(lines.every((line) => line === line.trim())).toBe(true);
+    expect(lines).not.toContain("-");
+    expect(lines.join(" ")).toContain("ChatGPT quota unavailable for API key");
+  });
+
+  it("wraps long error rows within the sidebar width and keeps bar rows unchanged", () => {
+    const message = "Could not parse OpenCode Console budgets/org response";
+    const data = {
+      entries: [{ name: "Copilot", percentRemaining: 75 }],
+      errors: [{ label: "OpenCode Zen", message }],
+      sessionTokens: undefined,
+    };
+    const unwrapped = formatQuotaRows({
+      version: "1.0.0",
+      layout: TUI_SIDEBAR_LAYOUT,
+      entries: data.entries,
+      errors: data.errors,
+      style: "singleWindow",
+      percentDisplayMode: "remaining",
+    }).split("\n");
+
+    const lines = buildSidebarQuotaPanelLines({
+      data,
+      config: { formatStyle: "singleWindow", percentDisplayMode: "remaining" },
+    });
+
+    expect(lines.every((line) => line.length <= TUI_SIDEBAR_MAX_WIDTH)).toBe(true);
+    const errorStart = lines.findIndex((line) => line.startsWith("OpenCode Zen:"));
+    expect(lines.slice(0, errorStart)).toEqual(unwrapped.slice(0, errorStart));
+    expect(lines.slice(errorStart).join(" ")).toBe(`OpenCode Zen: ${message}`);
+    expect(lines.length).toBeGreaterThan(unwrapped.length);
   });
 
   it("uses the fixed sidebar layout instead of toast layout settings", () => {
@@ -135,9 +218,10 @@ describe("buildSidebarQuotaPanelLines", () => {
     });
 
     expect(lines).toEqual(expected);
-    expect(lines).toHaveLength(2);
+    expect(lines).toHaveLength(4);
     expect(lines[0]).toBe("[Copilot] (business)");
-    expect(lines[1]).toContain("9 used");
+    expect(lines[1]).toBe("Usage:");
+    expect(lines[2].trim()).toBe("9 used | 2026-01 | org=acme-corp");
     expect(lines.join("\n")).not.toContain("→ ");
     expect(lines.every((line) => line.length <= TUI_SIDEBAR_MAX_WIDTH)).toBe(true);
   });
@@ -171,30 +255,6 @@ describe("buildSidebarQuotaPanelLines", () => {
     expect(rendered).toContain("\nAPI ");
     expect(rendered).toContain("\nFast ");
     expect(rendered).not.toContain("Quota window");
-  });
-
-  it("preserves explicit Antigravity labels and falls back for unlabeled legacy rows", () => {
-    const lines = buildSidebarQuotaPanelLines({
-      config: {
-        formatStyle: "allWindows",
-        percentDisplayMode: "remaining",
-      },
-      data: {
-        entries: [
-          { name: "Claude (acct)", label: "Claude:", percentRemaining: 67 },
-          { name: "G3Pro (acct)", percentRemaining: 67 },
-        ],
-        errors: [],
-        sessionTokens: undefined,
-      },
-    });
-
-    const rendered = lines.join("\n");
-    expect(rendered).toContain("[Antigravity (acct)]");
-    expect(rendered).toContain("\nClaude ");
-    expect(rendered.match(/\[Antigravity \(acct\)\]/gu)).toHaveLength(2);
-    expect(rendered).not.toContain("[Claude] (acct)");
-    expect(rendered).not.toContain("[G3Pro] (acct)");
   });
 
   it("renders Gemini CLI model tiers in grouped sidebar output", () => {
@@ -257,9 +317,9 @@ describe("buildSidebarQuotaPanelLines", () => {
       },
     });
 
-    expect(lines.findIndex((line) => line.includes("Five-hour"))).toBeGreaterThanOrEqual(0);
+    expect(lines.findIndex((line) => line.includes("5h"))).toBeGreaterThanOrEqual(0);
     expect(lines.findIndex((line) => line.includes("Weekly"))).toBeGreaterThanOrEqual(0);
-    expect(lines.findIndex((line) => line.includes("Five-hour"))).toBeLessThan(
+    expect(lines.findIndex((line) => line.includes("5h"))).toBeLessThan(
       lines.findIndex((line) => line.includes("Weekly")),
     );
   });
@@ -320,7 +380,7 @@ describe("buildSidebarQuotaPanelLines", () => {
     expect(rendered).not.toContain("0% used");
   });
 
-  it("uses compact rounded reset text in sidebar rows", () => {
+  it("uses precise reset text in sidebar rows by default", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-15T10:00:00.000Z"));
 
@@ -342,8 +402,8 @@ describe("buildSidebarQuotaPanelLines", () => {
       },
     });
 
-    expect(lines.join("\n")).toContain("2.5h");
-    expect(lines.join("\n")).not.toContain("2h 14m");
+    expect(lines.join("\n")).toContain("2h14m");
+    expect(lines.join("\n")).not.toContain("2.5h");
   });
 
   it("uses fractional reset text in sidebar rows when resetTimeDecimals is set", () => {
@@ -630,5 +690,47 @@ describe("buildSidebarQuotaPanelLines", () => {
 
     expect(used).toEqual(remaining);
     expect(used.join("\n")).toContain("$2.40 / $20.00");
+  });
+
+  it("applies default spaced resets and bare labels within the 36-column sidebar", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-15T10:00:00.000Z"));
+    const data = {
+      entries: [
+        {
+          name: "OpenAI Account With A Long Label Weekly",
+          group: "OpenAI Account With A Long Label",
+          label: "Weekly:",
+          percentRemaining: 81,
+          resetTimeIso: "2026-01-17T15:14:00.000Z",
+        },
+      ],
+      errors: [],
+      sessionTokens: undefined,
+    };
+
+    for (const formatStyle of ["singleWindow", "allWindows"] as const) {
+      const full = buildSidebarQuotaPanelLines({
+        data,
+        config: { formatStyle, percentDisplayMode: "remaining" },
+      });
+      const bare = buildSidebarQuotaPanelLines({
+        data,
+        config: {
+          formatStyle,
+          percentDisplayMode: "remaining",
+          percentLabelStyle: "bare",
+          resetTimeSpaced: DEFAULT_CONFIG.resetTimeSpaced,
+        },
+      });
+      const barCells = (lines: string[]) =>
+        lines.find((line) => line.includes("█"))?.match(/[█░]/gu)?.length ?? 0;
+
+      expect(bare.join("\n")).toContain("81%");
+      expect(bare.join("\n")).not.toContain("81% left");
+      expect(bare.join("\n")).toContain("2d 5h 14m");
+      expect(barCells(bare)).toBe(barCells(full) + " left".length);
+      expect(bare.every((line) => line.length <= TUI_SIDEBAR_MAX_WIDTH)).toBe(true);
+    }
   });
 });

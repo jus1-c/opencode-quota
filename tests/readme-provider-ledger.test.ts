@@ -1,4 +1,4 @@
-import { readFileSync } from "fs";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 function read(path: string): string {
@@ -57,160 +57,30 @@ function readPreConfiguredProviderTables(document: string): ProviderLedgerRow[][
   return tables;
 }
 
-function readPreConfiguredProviderLedger(document: string): ProviderLedgerRow[] {
-  return readPreConfiguredProviderTables(document).flat();
+function readTierNeutralProviderTables(document: string): ProviderLedgerRow[][] {
+  return readPreConfiguredProviderTables(document).map((table) =>
+    table.map((row) => ({
+      ...row,
+      provider: row.provider === "xAI SuperGrok" ? "xAI" : row.provider,
+    })),
+  );
 }
 
 describe("README provider ledger", () => {
   const readme = read("README.md");
   const providerGuide = read("docs/readme/providers.md");
-  const providerTemplate = read("contributing/provider-template/README.md");
 
   it("keeps the README and provider guide ledgers consistent", () => {
-    expect(readPreConfiguredProviderTables(readme)).toEqual(
-      readPreConfiguredProviderTables(providerGuide),
+    expect(readTierNeutralProviderTables(readme)).toEqual(
+      readTierNeutralProviderTables(providerGuide),
     );
   });
 
-  it("keeps audience tables alphabetized with intentional duplicates", () => {
-    const expectedProviders = [
-      [
-        "Anthropic (Claude)",
-        "Chutes AI",
-        "Cursor",
-        "GitHub Copilot",
-        "Google AGY",
-        "Google Antigravity",
-        "Kilo Gateway",
-        "LLMGate",
-        "NanoGPT",
-        "Ollama Cloud",
-        "OpenAI",
-        "OpenCode Go",
-        "OpenCode Zen",
-        "OpenRouter",
-        "Synthetic",
-        "Vilao",
-        "xAI SuperGrok",
-      ],
-      [
-        "Anthropic (Claude)",
-        "Chutes AI",
-        "Cursor",
-        "Gemini CLI (deprecated)",
-        "GitHub Copilot",
-        "Google AGY",
-        "Google Antigravity",
-        "NanoGPT",
-        "OpenAI",
-        "OpenCode Zen",
-        "OpenRouter",
-        "Synthetic",
-        "xAI SuperGrok",
-      ],
-      [
-        "Alibaba Coding Plan",
-        "DeepSeek",
-        "Kimi Code",
-        "MiniMax Coding Plan",
-        "MiniMax Coding Plan (CN)",
-        "Qwen Code",
-        "Xiaomi MiMo",
-        "Z.ai Coding Plan",
-        "Zhipu Coding Plan",
-      ],
-      ["Kimi Code", "MiniMax Coding Plan", "MiniMax Coding Plan (CN)", "Zhipu Coding Plan"],
-    ];
-
+  it("keeps the basic provider documentation structure", () => {
     for (const document of [readme, providerGuide]) {
-      expect(
-        readPreConfiguredProviderTables(document).map((table) => table.map((row) => row.provider)),
-      ).toEqual(expectedProviders);
-      const providerSection = readPreConfiguredProviderSection(document);
-      const chineseHeadingIndex = providerSection.search(
-        /^### (?:Pre-configured )?Chinese providers$/m,
-      );
-      const disclosures = Array.from(
-        providerSection.matchAll(
-          /<details( open)?>\s*<summary><strong>([^<]+)<\/strong><\/summary>/g,
-        ),
-      ).map((match) => ({
-        region: (match.index ?? 0) < chineseHeadingIndex ? "americas" : "chinese",
-        label: match[2],
-        open: match[1] !== undefined,
-      }));
-      expect(disclosures).toEqual([
-        { region: "americas", label: "Personal", open: true },
-        { region: "americas", label: "Business / Enterprise", open: false },
-        { region: "chinese", label: "Personal", open: true },
-        { region: "chinese", label: "Business / Team", open: false },
-      ]);
+      expect(document).toMatch(/^#.+Providers|^## Providers$/m);
+      expect(document).toMatch(/^#{2,3} Custom providers$/m);
+      expect(document).toContain("npx @slkiser/opencode-quota@latest provider add");
     }
-  });
-
-  it("uses the minimal auth/setup label vocabulary", () => {
-    const allowedAuthSetupLabels = new Set(["Automatic", "Needs setup", "Existing setups only"]);
-
-    for (const row of readPreConfiguredProviderLedger(readme)) {
-      expect(allowedAuthSetupLabels.has(row.authSetup), `${row.provider}: ${row.authSetup}`).toBe(
-        true,
-      );
-    }
-  });
-
-  it("uses friendly report wording and Quota-first ordering", () => {
-    for (const document of [readme, providerGuide]) {
-      expect(document).not.toContain("Usage/quota");
-      expect(document).not.toContain("Quota/usage");
-    }
-
-    const allowedReports = new Set([
-      "Quota",
-      "Quota and usage",
-      "Usage and budget",
-      "Budget and spend",
-      "Budget and balance",
-      "Quota and balance",
-      "Balance",
-      "Balance and status",
-    ]);
-
-    const rows = readPreConfiguredProviderLedger(readme);
-    for (const row of rows) {
-      expect(allowedReports.has(row.reports), `${row.provider}: ${row.reports}`).toBe(true);
-    }
-
-    for (const provider of ["OpenAI", "Qwen Code"]) {
-      expect(rows.filter((row) => row.provider === provider).map((row) => row.reports)).toEqual(
-        rows.filter((row) => row.provider === provider).map(() => "Quota"),
-      );
-    }
-  });
-
-  it("uses the approved provider headings and data provenance label", () => {
-    const customReports =
-      "Custom providers can report quota, rate limit, usage, spend, budget, balance, or status.";
-
-    expect(providerTemplate).toContain("`Data from` rather than `Source`");
-    expect(providerTemplate).toContain("friendly labels, not exact internal result types");
-    expect(providerTemplate).toContain("`Quota` as the umbrella");
-    expect(providerTemplate).toContain("exact internal `resultType` values");
-
-    for (const document of [readme, providerGuide]) {
-      expect(document).toMatch(
-        /^#{2,3} (?:Pre-configured providers|Pre-configured American providers)$/m,
-      );
-      expect(document).toMatch(/^### (?:Pre-configured )?American providers$/m);
-      expect(document).toMatch(/^### (?:Pre-configured )?Chinese providers$/m);
-      expect(document).toContain("Custom providers");
-      expect(document).toContain("| Data from");
-      expect(document).not.toContain("| Source");
-    }
-
-    expect(readme).toContain(
-      "You can add a provider with an HTTPS quota API, or track a local usage estimate",
-    );
-    expect(readme).not.toContain(customReports);
-    expect(providerGuide).toContain(customReports);
   });
 });

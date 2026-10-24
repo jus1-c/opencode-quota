@@ -6,25 +6,6 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { sanitizeUpstreamPluginSnapshot } from "../scripts/lib/upstream-plugin-sanitization.mjs";
 
-async function writeAntigravityConstants(
-  pluginRoot: string,
-  clientId: string,
-  clientSecret: string,
-) {
-  const constantsDir = path.join(pluginRoot, "dist", "src");
-  await mkdir(constantsDir, { recursive: true });
-  await writeFile(
-    path.join(constantsDir, "constants.js"),
-    `export const ANTIGRAVITY_CLIENT_ID = "${clientId}";\nexport const ANTIGRAVITY_CLIENT_SECRET = "${clientSecret}";\n`,
-    "utf8",
-  );
-  await writeFile(
-    path.join(constantsDir, "constants.d.ts"),
-    `export declare const ANTIGRAVITY_CLIENT_ID = "${clientId}";\nexport declare const ANTIGRAVITY_CLIENT_SECRET = "${clientSecret}";\n`,
-    "utf8",
-  );
-}
-
 async function writeAgySnapshot(pluginRoot: string, clientId: string, clientSecret: string) {
   const distDir = path.join(pluginRoot, "dist");
   const constantsDir = path.join(distDir, "src");
@@ -83,128 +64,18 @@ async function writeGeminiDistBundle(pluginRoot: string, clientId: string, clien
   );
 }
 
-async function writeCursorSnapshot(
-  pluginRoot: string,
-  params: { modelsSource: string; proxySource: string; packageName?: string },
-) {
+async function writeCursorSnapshot(pluginRoot: string, pricingSource: string) {
   const distDir = path.join(pluginRoot, "dist");
   await mkdir(distDir, { recursive: true });
-  await writeFile(path.join(distDir, "models.js"), params.modelsSource, "utf8");
-  await writeFile(path.join(distDir, "proxy.js"), params.proxySource, "utf8");
-
-  if (params.packageName) {
-    await writeFile(
-      path.join(pluginRoot, "package.json"),
-      JSON.stringify({ name: params.packageName }, null, 2),
-      "utf8",
-    );
-  }
+  await writeFile(path.join(distDir, "pricing-data.js"), pricingSource, "utf8");
 }
 
-const UNSAFE_CURSOR_MODELS_SOURCE = `let cachedModels = null;
-export async function getCursorModels(apiKey) {
-    if (cachedModels)
-        return cachedModels;
-    const discovered = await fetchCursorUsableModels(apiKey);
-    cachedModels = discovered && discovered.length > 0 ? discovered : FALLBACK_MODELS;
-    return cachedModels;
-}
-`;
-
-const SAFE_CURSOR_MODELS_SOURCE = `let cachedModels = null;
-export async function getCursorModels(apiKey) {
-    if (cachedModels)
-        return cachedModels;
-    const discovered = await fetchCursorUsableModels(apiKey);
-    if (discovered && discovered.length > 0) {
-        cachedModels = discovered;
-        return cachedModels;
+const CURSOR_PRICING_SOURCE = `export const CURSOR_MODEL_COSTS = {
+    "claude-opus-5": {
+        "input": 5,
+        "output": 25
     }
-    return FALLBACK_MODELS;
-}
-`;
-
-const UNSAFE_CURSOR_PROXY_SOURCE = `/** Derive a key for active bridge lookup (tool-call continuations). Model-specific. */
-function deriveBridgeKey(modelId, messages) {
-    const firstUserMsg = messages.find((m) => m.role === "user");
-    const firstUserText = firstUserMsg ? textContent(firstUserMsg.content) : "";
-    return createHash("sha256")
-        .update(\`bridge:\${modelId}:\${firstUserText.slice(0, 200)}\`)
-        .digest("hex")
-        .slice(0, 16);
-}
-/** Derive a key for conversation state. Model-independent so context survives model switches. */
-function deriveConversationKey(messages) {
-    const firstUserMsg = messages.find((m) => m.role === "user");
-    const firstUserText = firstUserMsg ? textContent(firstUserMsg.content) : "";
-    return createHash("sha256")
-        .update(\`conv:\${firstUserText.slice(0, 200)}\`)
-        .digest("hex")
-        .slice(0, 16);
-}
-`;
-
-const SAFE_CURSOR_PROXY_SOURCE = `function normalizeConversationMessages(messages) {
-    return messages
-        .filter((m) => m.role !== "tool")
-        .map((m) => ({
-        role: m.role,
-        content: textContent(m.content),
-    }))
-        .filter((m) => m.content || m.role === "user" || m.role === "system");
-}
-/** Derive a key for active bridge lookup (tool-call continuations). Model-specific. */
-function deriveBridgeKey(modelId, messages) {
-    const normalizedMessages = normalizeConversationMessages(messages);
-    return createHash("sha256")
-        .update(JSON.stringify({
-        modelId,
-        messages: normalizedMessages,
-    }))
-        .digest("hex")
-        .slice(0, 16);
-}
-/** Derive a key for conversation state. Model-independent so context survives model switches. */
-function deriveConversationKey(messages) {
-    const normalizedMessages = normalizeConversationMessages(messages);
-    return createHash("sha256")
-        .update(JSON.stringify({
-        messages: normalizedMessages,
-    }))
-        .digest("hex")
-        .slice(0, 16);
-}
-`;
-
-const PARTIALLY_SAFE_CURSOR_PROXY_SOURCE = `function normalizeConversationMessages(messages) {
-    return messages
-        .filter((m) => m.role !== "tool")
-        .map((m) => ({
-        role: m.role,
-        content: textContent(m.content),
-    }))
-        .filter((m) => m.content || m.role === "user" || m.role === "system");
-}
-/** Derive a key for active bridge lookup (tool-call continuations). Model-specific. */
-function deriveBridgeKey(modelId, messages) {
-    const normalizedMessages = normalizeConversationMessages(messages);
-    return createHash("sha256")
-        .update(JSON.stringify({
-        modelId,
-        messages: normalizedMessages,
-    }))
-        .digest("hex")
-        .slice(0, 16);
-}
-/** Derive a key for conversation state. Model-independent so context survives model switches. */
-function deriveConversationKey(messages) {
-    const firstUserMsg = messages.find((m) => m.role === "user");
-    const firstUserText = firstUserMsg ? textContent(firstUserMsg.content) : "";
-    return createHash("sha256")
-        .update(\`conv:\${firstUserText.slice(0, 200)}\`)
-        .digest("hex")
-        .slice(0, 16);
-}
+};
 `;
 
 describe("upstream-plugin-sanitization", () => {
@@ -214,22 +85,6 @@ describe("upstream-plugin-sanitization", () => {
     await Promise.all(
       tempRoots.splice(0).map((root) => rm(root, { force: true, recursive: true })),
     );
-  });
-
-  it("redacts embedded Google OAuth values from antigravity snapshots", async () => {
-    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "opencode-quota-sanitize-"));
-    tempRoots.push(tempRoot);
-
-    await writeAntigravityConstants(tempRoot, "SAFE_TEST_CLIENT_ID", "SAFE_TEST_CLIENT_SECRET");
-
-    await sanitizeUpstreamPluginSnapshot("opencode-antigravity-auth", tempRoot);
-
-    await expect(
-      readFile(path.join(tempRoot, "dist", "src", "constants.js"), "utf8"),
-    ).resolves.toContain("REDACTED_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com");
-    await expect(
-      readFile(path.join(tempRoot, "dist", "src", "constants.d.ts"), "utf8"),
-    ).resolves.toContain("REDACTED_GOOGLE_OAUTH_CLIENT_SECRET");
   });
 
   it("redacts every published AGY OAuth credential copy", async () => {
@@ -306,6 +161,38 @@ describe("upstream-plugin-sanitization", () => {
     expect(sourceMap).not.toContain("SAFE_TEST_CLIENT_SECRET");
   });
 
+  it("redacts Google OAuth values from the Gemini CLI auth server bundle", async () => {
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "opencode-quota-sanitize-"));
+    tempRoots.push(tempRoot);
+
+    await writeGeminiDistBundle(tempRoot, "SAFE_TEST_CLIENT_ID", "SAFE_TEST_CLIENT_SECRET");
+    const distDir = path.join(tempRoot, "dist");
+    await writeFile(
+      path.join(distDir, "server.js"),
+      'var GEMINI_CLIENT_ID = "SAFE_TEST_CLIENT_ID";\nvar GEMINI_CLIENT_SECRET = "SAFE_TEST_CLIENT_SECRET";\n',
+      "utf8",
+    );
+    await writeFile(
+      path.join(distDir, "server.js.map"),
+      JSON.stringify({
+        sourcesContent: [
+          'export const GEMINI_CLIENT_ID = "SAFE_TEST_CLIENT_ID";\nexport const GEMINI_CLIENT_SECRET = "SAFE_TEST_CLIENT_SECRET";\n',
+        ],
+      }),
+      "utf8",
+    );
+
+    await sanitizeUpstreamPluginSnapshot("opencode-gemini-auth", tempRoot);
+
+    for (const relativePath of ["dist/server.js", "dist/server.js.map"]) {
+      const content = await readFile(path.join(tempRoot, relativePath), "utf8");
+      expect(content).toContain("REDACTED_GOOGLE_OAUTH_CLIENT_ID.apps.googleusercontent.com");
+      expect(content).toContain("REDACTED_GOOGLE_OAUTH_CLIENT_SECRET");
+      expect(content).not.toContain("SAFE_TEST_CLIENT_ID");
+      expect(content).not.toContain("SAFE_TEST_CLIENT_SECRET");
+    }
+  });
+
   it("fails closed when Gemini OAuth targets are all absent", async () => {
     const tempRoot = await mkdtemp(path.join(os.tmpdir(), "opencode-quota-sanitize-"));
     tempRoots.push(tempRoot);
@@ -336,123 +223,44 @@ describe("upstream-plugin-sanitization", () => {
     expect(constantsSource).toContain("'REDACTED_GOOGLE_OAUTH_CLIENT_SECRET'");
   });
 
-  it("fails closed when an expected secret assignment disappears", async () => {
+  it("leaves a credential-free Cursor snapshot unchanged", async () => {
     const tempRoot = await mkdtemp(path.join(os.tmpdir(), "opencode-quota-sanitize-"));
     tempRoots.push(tempRoot);
 
-    const constantsDir = path.join(tempRoot, "dist", "src");
-    await mkdir(constantsDir, { recursive: true });
-    await writeFile(
-      path.join(constantsDir, "constants.js"),
-      'export const OTHER = "value";\n',
-      "utf8",
+    await writeCursorSnapshot(tempRoot, CURSOR_PRICING_SOURCE);
+
+    await sanitizeUpstreamPluginSnapshot("cursor-opencode-provider", tempRoot);
+
+    await expect(readFile(path.join(tempRoot, "dist", "pricing-data.js"), "utf8")).resolves.toBe(
+      CURSOR_PRICING_SOURCE,
     );
-    await writeFile(
-      path.join(constantsDir, "constants.d.ts"),
-      'export declare const OTHER = "value";\n',
-      "utf8",
+  });
+
+  it("fails closed when a Cursor API key lands in the snapshot", async () => {
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "opencode-quota-sanitize-"));
+    tempRoots.push(tempRoot);
+
+    await writeCursorSnapshot(
+      tempRoot,
+      `${CURSOR_PRICING_SOURCE}const KEY = "crsr_${"a1".repeat(16)}";\n`,
     );
 
     await expect(
-      sanitizeUpstreamPluginSnapshot("opencode-antigravity-auth", tempRoot),
-    ).rejects.toThrow("Expected ANTIGRAVITY_CLIENT_ID");
+      sanitizeUpstreamPluginSnapshot("cursor-opencode-provider", tempRoot),
+    ).rejects.toThrow("Found unsanitized Cursor credential");
   });
 
-  it("rewrites unsafe Cursor OAuth snapshot guards into the safe local form", async () => {
+  it("fails closed when a Cursor access token lands in the snapshot", async () => {
     const tempRoot = await mkdtemp(path.join(os.tmpdir(), "opencode-quota-sanitize-"));
     tempRoots.push(tempRoot);
 
-    await writeCursorSnapshot(tempRoot, {
-      modelsSource: UNSAFE_CURSOR_MODELS_SOURCE,
-      proxySource: UNSAFE_CURSOR_PROXY_SOURCE,
-    });
-
-    await sanitizeUpstreamPluginSnapshot("opencode-cursor-oauth", tempRoot);
-
-    const modelsSource = await readFile(path.join(tempRoot, "dist", "models.js"), "utf8");
-    expect(modelsSource).toContain("if (discovered && discovered.length > 0) {");
-    expect(modelsSource).toContain("cachedModels = discovered;");
-    expect(modelsSource).toContain("return FALLBACK_MODELS;");
-    expect(modelsSource).not.toContain(
-      "cachedModels = discovered && discovered.length > 0 ? discovered : FALLBACK_MODELS;",
+    await writeCursorSnapshot(
+      tempRoot,
+      `${CURSOR_PRICING_SOURCE}const TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0LXVzZXIifQ.sig";\n`,
     );
 
-    const proxySource = await readFile(path.join(tempRoot, "dist", "proxy.js"), "utf8");
-    expect(proxySource).toContain('.filter((m) => m.role !== "tool")');
-    expect(proxySource).toContain("messages: normalizedMessages");
-    expect(proxySource).not.toContain(
-      'const firstUserMsg = messages.find((m) => m.role === "user");',
-    );
-    expect(proxySource).not.toContain("firstUserText.slice(0, 200)");
-  });
-
-  it("sanitizes the tracked Cursor snapshot even when the published package name is scoped", async () => {
-    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "opencode-quota-sanitize-"));
-    tempRoots.push(tempRoot);
-
-    await writeCursorSnapshot(tempRoot, {
-      modelsSource: UNSAFE_CURSOR_MODELS_SOURCE,
-      packageName: "@playwo/opencode-cursor-oauth",
-      proxySource: UNSAFE_CURSOR_PROXY_SOURCE,
-    });
-
-    await sanitizeUpstreamPluginSnapshot("opencode-cursor-oauth", tempRoot);
-
-    await expect(readFile(path.join(tempRoot, "dist", "models.js"), "utf8")).resolves.toContain(
-      "if (discovered && discovered.length > 0) {",
-    );
-    await expect(readFile(path.join(tempRoot, "dist", "proxy.js"), "utf8")).resolves.toContain(
-      "messages: normalizedMessages",
-    );
-  });
-
-  it("leaves already-safe Cursor OAuth snapshot guards unchanged", async () => {
-    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "opencode-quota-sanitize-"));
-    tempRoots.push(tempRoot);
-
-    await writeCursorSnapshot(tempRoot, {
-      modelsSource: SAFE_CURSOR_MODELS_SOURCE,
-      proxySource: SAFE_CURSOR_PROXY_SOURCE,
-    });
-
-    await sanitizeUpstreamPluginSnapshot("opencode-cursor-oauth", tempRoot);
-
-    await expect(readFile(path.join(tempRoot, "dist", "models.js"), "utf8")).resolves.toBe(
-      SAFE_CURSOR_MODELS_SOURCE,
-    );
-    await expect(readFile(path.join(tempRoot, "dist", "proxy.js"), "utf8")).resolves.toBe(
-      SAFE_CURSOR_PROXY_SOURCE,
-    );
-  });
-
-  it("fails closed when a Cursor OAuth guard shape changes unexpectedly", async () => {
-    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "opencode-quota-sanitize-"));
-    tempRoots.push(tempRoot);
-
-    await writeCursorSnapshot(tempRoot, {
-      modelsSource: SAFE_CURSOR_MODELS_SOURCE,
-      proxySource: `function deriveBridgeKey(modelId, messages) {
-    return modelId + ":" + messages.length;
-}
-`,
-    });
-
-    await expect(sanitizeUpstreamPluginSnapshot("opencode-cursor-oauth", tempRoot)).rejects.toThrow(
-      "Expected CURSOR_TRANSCRIPT_BRIDGE_KEY",
-    );
-  });
-
-  it("fails closed when only one Cursor proxy key derivation is sanitized", async () => {
-    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "opencode-quota-sanitize-"));
-    tempRoots.push(tempRoot);
-
-    await writeCursorSnapshot(tempRoot, {
-      modelsSource: SAFE_CURSOR_MODELS_SOURCE,
-      proxySource: PARTIALLY_SAFE_CURSOR_PROXY_SOURCE,
-    });
-
-    await expect(sanitizeUpstreamPluginSnapshot("opencode-cursor-oauth", tempRoot)).rejects.toThrow(
-      "Expected CURSOR_TRANSCRIPT_BRIDGE_KEY",
-    );
+    await expect(
+      sanitizeUpstreamPluginSnapshot("cursor-opencode-provider", tempRoot),
+    ).rejects.toThrow("Found unsanitized Cursor credential");
   });
 });

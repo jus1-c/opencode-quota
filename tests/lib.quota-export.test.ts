@@ -1,16 +1,31 @@
-import { readFileSync } from "fs";
-import { homedir } from "os";
-import { join } from "path";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // --------------- mock modules ---------------
 
+const testPaths = vi.hoisted(() => {
+  const separator = process.platform === "win32" ? "\\" : "/";
+  const join = (...parts: string[]) => parts.join(separator);
+  const root = join(process.cwd(), ".quota-export-test");
+  const cacheDir = join(root, "cache");
+  return {
+    dataDir: join(root, "data"),
+    configDir: join(root, "config"),
+    cacheDir,
+    stateDir: join(root, "state"),
+    defaultExport: join(cacheDir, "quota-export.json"),
+    explicitExport: join(root, "export.json"),
+  };
+});
+
 vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
   getOpencodeRuntimeDirs: () => ({
-    dataDir: "/tmp/test-opencode-quota-export/data",
-    configDir: "/tmp/test-opencode-quota-export/config",
-    cacheDir: "/tmp/test-opencode-quota-export/cache",
-    stateDir: "/tmp/test-opencode-quota-export/state",
+    dataDir: testPaths.dataDir,
+    configDir: testPaths.configDir,
+    cacheDir: testPaths.cacheDir,
+    stateDir: testPaths.stateDir,
   }),
 }));
 
@@ -62,7 +77,6 @@ function createMockContext(): any {
       },
     },
     config: {
-      googleModels: ["CLAUDE"],
       anthropicBinaryPath: "claude",
       cursorPlan: "none",
       onlyCurrentModel: false,
@@ -82,12 +96,33 @@ const QUOTA_ACCOUNTING = {
 
 describe("resolveExportPath", () => {
   it("handles empty, tilde, absolute, and relative paths", () => {
-    expect(resolveExportPath("")).toBe("/tmp/test-opencode-quota-export/cache/quota-export.json");
+    expect(resolveExportPath("")).toBe(testPaths.defaultExport);
     expect(resolveExportPath("~/my-exports/quota.json")).toBe(
       join(homedir(), "my-exports/quota.json"),
     );
     expect(resolveExportPath("/etc/opencode/export.json")).toBe("/etc/opencode/export.json");
     expect(resolveExportPath("relative/path/quota.json")).toBe("relative/path/quota.json");
+  });
+
+  it("expands Windows-style home-relative paths across platforms", () => {
+    expect(resolveExportPath("~\\exports\\quota.json")).toBe(
+      join(homedir(), "exports", "quota.json"),
+    );
+    expect(resolveExportPath("~\\exports\\\\nested\\quota.json")).toBe(
+      join(homedir(), "exports", "nested", "quota.json"),
+    );
+    expect(resolveExportPath("~\\")).toBe(homedir());
+  });
+
+  it("leaves unsupported tilde and ordinary backslash paths unchanged", () => {
+    expect(resolveExportPath("~")).toBe("~");
+    expect(resolveExportPath("~user/exports")).toBe("~user/exports");
+    expect(resolveExportPath("relative\\path.json")).toBe("relative\\path.json");
+    expect(resolveExportPath("C:\\exports\\quota.json")).toBe("C:\\exports\\quota.json");
+    expect(resolveExportPath("\\\\server\\share\\quota.json")).toBe(
+      "\\\\server\\share\\quota.json",
+    );
+    expect(resolveExportPath("~/literal\\name.json")).toBe(join(homedir(), "literal\\name.json"));
   });
 });
 
@@ -114,6 +149,17 @@ describe("buildQuotaExport", () => {
             percentRemaining: 75,
             resetTimeIso: "2026-07-01T00:00:00.000Z",
             label: "Monthly:",
+            fixedWindow: {
+              kind: "fixed_window",
+              startedAtIso: "2026-06-01T00:00:00.000Z",
+              observedAtIso: "2026-06-01T11:00:00.000Z",
+              endsAtIso: "2026-07-01T00:00:00.000Z",
+              fullReset: true,
+            },
+            runway: {
+              kind: "before_reset",
+              projectedAtIso: "2026-06-15T00:00:00.000Z",
+            },
           },
           {
             accounting: QUOTA_ACCOUNTING,
@@ -190,7 +236,54 @@ describe("buildQuotaExport", () => {
     }
   });
 
-  it("preserves raw Antigravity family names when display projections suppress them", async () => {
+  it("exports semantic availability booleans with generic wording and the raw name", async () => {
+    mockReadCachedProviderResult.mockResolvedValue({
+      hit: true,
+      result: {
+        attempted: true,
+        entries: [
+          {
+            accounting: { ...QUOTA_ACCOUNTING, resultType: "status" },
+            kind: "boolean",
+            name: "Raw provider availability",
+            value: false,
+            semantic: {
+              metric: { kind: "named", name: "Availability" },
+              prominence: "primary",
+            },
+          },
+        ],
+        errors: [],
+      },
+      timestamp: Date.now(),
+    });
+
+    const exportData = await buildQuotaExport({
+      providers: [createMockProvider("availability")],
+      ctx: createMockContext(),
+      ttlMs: 60_000,
+      fromCache: true,
+    });
+
+    const provider = exportData.providers.availability;
+    expect(provider).toBeDefined();
+    if (provider.status === "ok") {
+      expect(provider.entries).toEqual([
+        {
+          name: "Raw provider availability",
+          resultType: "status",
+          acquisitionMethod: "remote_api",
+          ownership: "maintained",
+          authority: "provider_reported",
+          renderType: "value",
+          value: "Disabled",
+        },
+      ]);
+      expect(provider.entries[0]).not.toHaveProperty("semantic");
+    }
+  });
+
+  it("preserves raw family names when display projections suppress them", async () => {
     mockReadCachedProviderResult.mockResolvedValue({
       hit: true,
       result: {
@@ -198,7 +291,7 @@ describe("buildQuotaExport", () => {
         entries: [
           {
             accounting: { ...QUOTA_ACCOUNTING, sourceId: "alice@example.com" },
-            name: "Antigravity (ali…): Claude",
+            name: "Example (ali…): Claude",
             percentRemaining: 0,
           },
           {
@@ -218,17 +311,17 @@ describe("buildQuotaExport", () => {
     });
 
     const actual = await buildQuotaExport({
-      providers: [createMockProvider("google-antigravity")],
+      providers: [createMockProvider("example-family")],
       ctx: createMockContext(),
       ttlMs: 60_000,
       fromCache: true,
     });
-    const provider = actual.providers["google-antigravity"];
+    const provider = actual.providers["example-family"];
     expect(provider).toMatchObject({
       status: "partial",
       entries: [
         {
-          name: "Antigravity (ali…): Claude",
+          name: "Example (ali…): Claude",
           sourceId: "alice@example.com",
           renderType: "percent",
           percentRemaining: 0,
@@ -298,6 +391,54 @@ describe("buildQuotaExport", () => {
     }
   });
 
+  it("omits OpenRouter API-key diagnostics from export data", async () => {
+    const secretCanary = "sk-or-export-secret-canary";
+    mockReadCachedProviderResult.mockResolvedValue({
+      hit: true,
+      result: {
+        attempted: true,
+        entries: [
+          {
+            accounting: {
+              resultType: "budget",
+              acquisitionMethod: "remote_api",
+              ownership: "maintained",
+              authority: "provider_reported",
+            },
+            name: "OpenRouter budget",
+            percentRemaining: 80,
+          },
+        ],
+        errors: [],
+        statusDetails: [
+          { key: "api_key_configured", value: "true" },
+          { key: "api_key_source", value: "env" },
+          { key: "api_key_checked_paths", value: "env:OPENROUTER_API_KEY" },
+          { key: "api_key_credential_database_paths", value: "/tmp/opencode.db" },
+          { key: "secret_canary", value: secretCanary },
+        ],
+      },
+      timestamp: Date.now(),
+    });
+
+    const actual = await buildQuotaExport({
+      providers: [createMockProvider("openrouter")],
+      ctx: createMockContext(),
+      ttlMs: 60_000,
+      fromCache: true,
+    });
+
+    expect(actual.providers.openrouter).toMatchObject({
+      status: "ok",
+      entries: [{ name: "OpenRouter budget", percentRemaining: 80 }],
+    });
+    const serialized = JSON.stringify(actual);
+    expect(serialized).not.toContain("api_key_");
+    expect(serialized).not.toContain("statusDetails");
+    expect(serialized).not.toContain(secretCanary);
+    expect(actual.providers.openrouter).not.toHaveProperty("statusDetails");
+  });
+
   it("matches the v2 all-result-types JSON golden", async () => {
     vi.setSystemTime(new Date("2026-07-11T00:00:00.000Z"));
     mockReadCachedProviderResult.mockResolvedValue({
@@ -306,9 +447,11 @@ describe("buildQuotaExport", () => {
       timestamp: new Date("2026-07-10T23:59:00.000Z").getTime(),
     });
 
+    const ctx = createMockContext();
+    ctx.config.accountingDetail = "summary";
     const actual = await buildQuotaExport({
       providers: [createMockProvider("fixture")],
-      ctx: createMockContext(),
+      ctx,
       ttlMs: 60_000,
       fromCache: true,
     });
@@ -321,6 +464,35 @@ describe("buildQuotaExport", () => {
 
     expect(actual).toEqual(accountingContractExport);
     expect(actual).toEqual(golden);
+
+    const provider = actual.providers.fixture;
+    expect(provider.status).toBe("ok");
+    if (provider.status === "ok") {
+      expect(provider.entries[0]).toMatchObject({ renderType: "value", value: "USD 10.00" });
+      expect(provider.entries).toContainEqual(
+        expect.objectContaining({ name: "Auto-reload", renderType: "value", value: "Enabled" }),
+      );
+      const allowedKeys = new Set([
+        "name",
+        "resultType",
+        "acquisitionMethod",
+        "ownership",
+        "authority",
+        "sourceId",
+        "observedAt",
+        "window",
+        "resetAt",
+        "renderType",
+        "percentRemaining",
+        "value",
+      ]);
+      expect(
+        provider.entries.every((entry) => Object.keys(entry).every((key) => allowedKeys.has(key))),
+      ).toBe(true);
+      expect(JSON.stringify(provider.entries)).not.toMatch(
+        /"(?:semantic|prominence|basis|quantity)"/u,
+      );
+    }
   });
 
   it("omits invalid optional timestamps instead of exporting NaN", async () => {
@@ -427,7 +599,7 @@ describe("buildQuotaExport", () => {
             outcome: "success",
             entryCount: 1,
             checkedPaths: ["env:GATEWAY_ONE_KEY"],
-            authPaths: ["/trusted/auth.json"],
+            credentialDatabasePaths: ["/trusted/opencode.db"],
           },
           {
             sourceId: "same-label-two",
@@ -437,11 +609,11 @@ describe("buildQuotaExport", () => {
             apiKeyEnv: null,
             selected: true,
             attempted: true,
-            credentialSource: "auth_json",
+            credentialSource: "opencode_db",
             outcome: "invalid_json",
             entryCount: 0,
             checkedPaths: ["/trusted/opencode.json"],
-            authPaths: ["/trusted/auth.json"],
+            credentialDatabasePaths: ["/trusted/opencode.db"],
           },
         ],
       },
@@ -484,7 +656,7 @@ describe("buildQuotaExport", () => {
     expect(json).not.toContain("GATEWAY_ONE_KEY");
     expect(json).not.toContain("private-adapter-literal");
     expect(json).not.toContain("json-v1");
-    expect(json).not.toContain("/trusted/auth.json");
+    expect(json).not.toContain("/trusted/opencode.db");
   });
 
   it("returns ordered unavailable quota-provider definitions when the cache has no aggregate entry", async () => {
@@ -600,9 +772,9 @@ describe("writeQuotaExport", () => {
 
   it("calls writeJsonAtomic with the resolved path and trailing newline", async () => {
     const exportData: any = { version: 2, providers: {} };
-    await writeQuotaExport(exportData, "/tmp/export.json");
+    await writeQuotaExport(exportData, testPaths.explicitExport);
 
-    expect(writeJsonAtomic).toHaveBeenCalledWith("/tmp/export.json", exportData, {
+    expect(writeJsonAtomic).toHaveBeenCalledWith(testPaths.explicitExport, exportData, {
       trailingNewline: true,
     });
   });

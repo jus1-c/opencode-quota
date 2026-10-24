@@ -1,0 +1,55 @@
+name: Provider request
+description: Ask for quota support for a new provider
+labels:
+  - provider
+body:
+  - type: markdown
+    attributes:
+      value: |
+        You can probably track this provider yourself today. [Here's how](https://github.com/slkiser/opencode-quota/blob/main/docs/readme/providers.md#custom-providers).
+        To be built in, a provider needs all of these: a listing on models.dev (the site OpenCode uses to list providers), requests from 2 different people, and public docs showing how to check usage.
+
+  - type: input
+    id: provider
+    attributes:
+      label: Provider name and website
+      placeholder: Example Provider - https://example.com
+    validations:
+      required: true
+
+  - type: textarea
+    id: plan
+    attributes:
+      label: Which plan do you pay for, and what's the limit?
+      placeholder: Pro plan. 100 requests every 5 hours, plus $20 of credit each month.
+    validations:
+      required: true
+
+  - type: textarea
+    id: quota_source
+    attributes:
+      label: Where does the provider show your usage?
+      description: A link to their docs, a screenshot, or describe the page. Don't paste any keys or passwords.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: can_test
+    attributes:
+      label: Can you try a test version before we release it?
+      description: Someone with an account usually has to check that it works.
+      options:
+        - Yes, I have an account and can test
+        - "No"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: affiliation
+    attributes:
+      label: Do you work for this provider?
+      options:
+        - "No"
+        - "Yes"
+    validations:
+      required: true

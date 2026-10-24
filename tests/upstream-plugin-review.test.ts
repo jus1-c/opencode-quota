@@ -17,13 +17,13 @@ describe("upstream-plugin-review", () => {
       buildChangedPluginSummaries(
         {
           plugins: {
-            "opencode-qwencode-auth": { version: "1.2.0" },
+            "opencode-gemini-auth": { version: "1.2.0" },
           },
         },
         {
           plugins: {
-            "opencode-antigravity-auth": { version: "1.6.0" },
-            "opencode-qwencode-auth": { version: "1.3.0" },
+            "opencode-agy-auth": { version: "1.6.0" },
+            "opencode-gemini-auth": { version: "1.3.0" },
           },
         },
       ),
@@ -32,14 +32,14 @@ describe("upstream-plugin-review", () => {
         changeKind: "added",
         changedFields: ["version"],
         currentVersion: "1.6.0",
-        pluginId: "opencode-antigravity-auth",
+        pluginId: "opencode-agy-auth",
         previousVersion: null,
       },
       {
         changeKind: "version",
         changedFields: ["version"],
         currentVersion: "1.3.0",
-        pluginId: "opencode-qwencode-auth",
+        pluginId: "opencode-gemini-auth",
         previousVersion: "1.2.0",
       },
     ]);
@@ -48,29 +48,29 @@ describe("upstream-plugin-review", () => {
   it("detects same-version metadata-only changes", () => {
     const previous = {
       version: "0.4.3",
-      packageName: "opencode-cursor-oauth",
-      repo: "old-owner/opencode-cursor",
-      referenceDir: "references/upstream-plugins/opencode-cursor-oauth",
-      npmUrl: "https://www.npmjs.com/package/opencode-cursor-oauth/v/0.4.3",
+      packageName: "@old-scope/cursor-opencode-provider",
+      repo: "old-owner/cursor-opencode-provider",
+      referenceDir: "references/upstream-plugins/cursor-opencode-provider",
+      npmUrl: "https://www.npmjs.com/package/%40old-scope/cursor-opencode-provider/v/0.4.3",
       publishedAt: "2026-04-08T14:04:58.057Z",
     };
     const current = {
       ...previous,
-      packageName: "@playwo/opencode-cursor-oauth",
-      repo: "PoolPirate/opencode-cursor",
+      packageName: "cursor-opencode-provider",
+      repo: "oakimov/cursor-opencode-provider",
     };
 
     expect(
       buildChangedPluginSummaries(
-        { plugins: { "opencode-cursor-oauth": previous } },
-        { plugins: { "opencode-cursor-oauth": current } },
+        { plugins: { "cursor-opencode-provider": previous } },
+        { plugins: { "cursor-opencode-provider": current } },
       ),
     ).toEqual([
       {
         changeKind: "metadata",
         changedFields: ["packageName", "repo"],
         currentVersion: "0.4.3",
-        pluginId: "opencode-cursor-oauth",
+        pluginId: "cursor-opencode-provider",
         previousVersion: "0.4.3",
       },
     ]);
@@ -79,7 +79,7 @@ describe("upstream-plugin-review", () => {
   it("keeps pre-synchronized reference-only changes in the review set", () => {
     const lock = {
       plugins: {
-        "opencode-cursor-oauth": {
+        "cursor-opencode-provider": {
           version: "0.4.3",
         },
       },
@@ -91,8 +91,8 @@ describe("upstream-plugin-review", () => {
         lock,
         new Map([
           [
-            "opencode-cursor-oauth",
-            ["references/upstream-plugins/opencode-cursor-oauth/package.json"],
+            "cursor-opencode-provider",
+            ["references/upstream-plugins/cursor-opencode-provider/package.json"],
           ],
         ]),
         [],
@@ -102,7 +102,7 @@ describe("upstream-plugin-review", () => {
         changeKind: "metadata",
         changedFields: ["reference contents"],
         currentVersion: "0.4.3",
-        pluginId: "opencode-cursor-oauth",
+        pluginId: "cursor-opencode-provider",
         previousVersion: "0.4.3",
       },
     ]);
@@ -116,7 +116,7 @@ describe("upstream-plugin-review", () => {
             changeKind: "metadata",
             changedFields: ["packageName"],
             currentVersion: "0.4.3",
-            pluginId: "opencode-cursor-oauth",
+            pluginId: "cursor-opencode-provider",
             previousVersion: "0.4.3",
           },
         ],
@@ -139,18 +139,18 @@ describe("upstream-plugin-review", () => {
 
   it("groups changed reference files by plugin", () => {
     const grouped = groupReferenceChangesByPlugin([
-      "references/upstream-plugins/opencode-qwencode-auth/package.json",
-      "references/upstream-plugins/opencode-qwencode-auth/src/index.ts",
-      "references/upstream-plugins/opencode-antigravity-auth/dist/index.js",
+      "references/upstream-plugins/opencode-gemini-auth/package.json",
+      "references/upstream-plugins/opencode-gemini-auth/src/index.ts",
+      "references/upstream-plugins/opencode-agy-auth/dist/index.js",
       "references/upstream-plugins/lock.json",
     ]);
 
-    expect(grouped.get("opencode-qwencode-auth")).toEqual([
-      "references/upstream-plugins/opencode-qwencode-auth/package.json",
-      "references/upstream-plugins/opencode-qwencode-auth/src/index.ts",
+    expect(grouped.get("opencode-gemini-auth")).toEqual([
+      "references/upstream-plugins/opencode-gemini-auth/package.json",
+      "references/upstream-plugins/opencode-gemini-auth/src/index.ts",
     ]);
-    expect(grouped.get("opencode-antigravity-auth")).toEqual([
-      "references/upstream-plugins/opencode-antigravity-auth/dist/index.js",
+    expect(grouped.get("opencode-agy-auth")).toEqual([
+      "references/upstream-plugins/opencode-agy-auth/dist/index.js",
     ]);
   });
 
@@ -206,10 +206,10 @@ describe("upstream-plugin-review", () => {
     const prompt = buildUpstreamPluginReviewPrompt({
       changedFilesByPlugin: new Map([
         [
-          "opencode-qwencode-auth",
+          "opencode-gemini-auth",
           [
-            "references/upstream-plugins/opencode-qwencode-auth/package.json",
-            "references/upstream-plugins/opencode-qwencode-auth/src/index.ts",
+            "references/upstream-plugins/opencode-gemini-auth/package.json",
+            "references/upstream-plugins/opencode-gemini-auth/src/index.ts",
           ],
         ],
       ]),
@@ -218,14 +218,14 @@ describe("upstream-plugin-review", () => {
           changeKind: "version",
           changedFields: ["version"],
           currentVersion: "1.3.0",
-          pluginId: "opencode-qwencode-auth",
+          pluginId: "opencode-gemini-auth",
           previousVersion: "1.2.0",
         },
       ],
       diffPreviewByPath: new Map([
         [
-          "references/upstream-plugins/opencode-qwencode-auth/package.json",
-          '--- a/references/upstream-plugins/opencode-qwencode-auth/package.json\n+++ b/references/upstream-plugins/opencode-qwencode-auth/package.json\n@@\n-  "version": "1.2.0"\n+  "version": "1.3.0"',
+          "references/upstream-plugins/opencode-gemini-auth/package.json",
+          '--- a/references/upstream-plugins/opencode-gemini-auth/package.json\n+++ b/references/upstream-plugins/opencode-gemini-auth/package.json\n@@\n-  "version": "1.2.0"\n+  "version": "1.3.0"',
         ],
       ]),
       testResult: {
@@ -243,7 +243,7 @@ describe("upstream-plugin-review", () => {
     });
 
     expect(prompt).toContain("Please check whether these upstream plugin updates conflict");
-    expect(prompt).toContain("opencode-qwencode-auth: 1.2.0 -> 1.3.0");
+    expect(prompt).toContain("opencode-gemini-auth: 1.2.0 -> 1.3.0");
     expect(
       buildUpstreamPluginReviewPrompt({
         changedFilesByPlugin: new Map(),
@@ -252,7 +252,7 @@ describe("upstream-plugin-review", () => {
             changeKind: "metadata",
             changedFields: ["packageName", "repo"],
             currentVersion: "0.4.3",
-            pluginId: "opencode-cursor-oauth",
+            pluginId: "cursor-opencode-provider",
             previousVersion: "0.4.3",
           },
         ],
@@ -265,8 +265,8 @@ describe("upstream-plugin-review", () => {
           output: "",
         },
       }),
-    ).toContain("opencode-cursor-oauth: metadata changed at 0.4.3 (packageName, repo)");
-    expect(prompt).toContain("references/upstream-plugins/opencode-qwencode-auth/package.json");
+    ).toContain("cursor-opencode-provider: metadata changed at 0.4.3 (packageName, repo)");
+    expect(prompt).toContain("references/upstream-plugins/opencode-gemini-auth/package.json");
     expect(prompt).toContain('"version": "1.3.0"');
     expect(prompt).toContain("`pnpm test`: passed");
     expect(prompt).toContain("`pnpm run typecheck`: failed");

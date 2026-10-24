@@ -1,81 +1,64 @@
 name: Bug report
 description: Report a reproducible bug in opencode-quota
-title: "[bug]: "
 labels:
   - bug
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for filing a bug. Please include enough detail to reproduce the issue.
-        Review `CONTRIBUTING.md` before submitting.
-        Inactive issues may be marked stale after 23 days and closed 7 days later if there are still no updates.
+        Using OpenCode 1? The older version of this plugin only gets small fixes now.
 
-  - type: checkboxes
-    id: checks
+  - type: dropdown
+    id: opencode_line
     attributes:
-      label: Pre-flight checks
+      label: Which OpenCode do you use?
       options:
-        - label: I searched existing issues and did not find a duplicate.
-          required: true
-        - label: I verified this on the current production released OpenCode version, or I explain why not below.
-          required: true
+        - OpenCode 2
+        - OpenCode 1
+    validations:
+      required: true
 
   - type: input
     id: opencode_version
     attributes:
-      label: OpenCode version tested
-      description: Example `1.2.15`
-      placeholder: 1.2.15
+      label: Your OpenCode version
+      description: Example `2.0.20`
+      placeholder: 2.0.20
     validations:
       required: true
 
   - type: input
     id: plugin_version
     attributes:
-      label: opencode-quota version tested
-      description: Example `2.2.1` or `main@<commit>`
-      placeholder: 2.2.1
+      label: Your plugin version
+      description: Run `/quota_status` in OpenCode. The version is in the first line. If it has `beta` in it, update first, because it may already be fixed.
+      placeholder: 5.0.1
     validations:
       required: true
 
   - type: textarea
     id: summary
     attributes:
-      label: Bug summary
-      description: Short description of what is broken.
+      label: What went wrong?
+      description: What did you expect, and what happened instead? Screenshots help. Drag them into this box.
     validations:
       required: true
 
   - type: textarea
     id: reproduction
     attributes:
-      label: Steps to reproduce
-      description: Include exact commands, slash commands, and config snippets.
+      label: How can we make it happen?
+      description: List the steps. Include any commands you typed and your settings.
       placeholder: |
-        1. Configure ...
-        2. Run ...
-        3. Observe ...
-
-  - type: textarea
-    id: expected
-    attributes:
-      label: Expected behavior
-
-  - type: textarea
-    id: actual
-    attributes:
-      label: Actual behavior
+        1. I set up ...
+        2. I typed ...
+        3. I saw ...
+    validations:
+      required: true
 
   - type: textarea
     id: logs
     attributes:
-      label: Relevant logs/output
-      description: "Optional: paste `/quota_status` output (add test output if helpful)."
+      label: Paste what `/quota_status` shows (optional)
+      description: It never shows your keys or passwords. It does show folder paths, which can include your computer's username.
       render: shell
-
-  - type: textarea
-    id: no_latest_reason
-    attributes:
-      label: If not tested on current production OpenCode, explain why
-      description: Leave blank if you tested on the current release.

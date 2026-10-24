@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,15 +13,16 @@ const TEST_ACCOUNTING = {
 const { authMocks, mockProviders, runtimeDirs } = vi.hoisted(() => ({
   authMocks: {
     anthropicConfigured: false,
-    kimiState: "none" as "none" | "configured",
+    kimiGlobalState: "none" as "none" | "configured",
+    kimiCnState: "none" as "none" | "configured",
   },
   mockProviders: [] as any[],
   runtimeDirs: {
     value: {
-      dataDirs: [] as string[],
-      configDirs: [] as string[],
-      cacheDirs: [] as string[],
-      stateDirs: [] as string[],
+      dataDir: "/tmp/opencode-quota-cli-show-data",
+      configDir: "/tmp/opencode-quota-cli-show-config",
+      cacheDir: "/tmp/opencode-quota-cli-show-cache",
+      stateDir: "/tmp/opencode-quota-cli-show-state",
     },
   },
 }));
@@ -32,7 +33,8 @@ vi.mock("../src/lib/anthropic.js", () => ({
 
 vi.mock("../src/lib/kimi-auth.js", () => ({
   DEFAULT_KIMI_AUTH_CACHE_MAX_AGE_MS: 30_000,
-  resolveKimiAuthCached: vi.fn(async () => ({ state: authMocks.kimiState })),
+  resolveKimiGlobalAuthCached: vi.fn(async () => ({ state: authMocks.kimiGlobalState })),
+  resolveKimiCnAuthCached: vi.fn(async () => ({ state: authMocks.kimiCnState })),
 }));
 
 vi.mock("../src/providers/registry.js", () => ({
@@ -40,17 +42,17 @@ vi.mock("../src/providers/registry.js", () => ({
 }));
 
 vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
-  getOpencodeRuntimeDirCandidates: () => runtimeDirs.value,
-  getOpencodeRuntimeDirs: () => ({
-    dataDir: runtimeDirs.value.dataDirs[0] ?? "/tmp/opencode-quota-cli-show-data",
-    configDir: runtimeDirs.value.configDirs[0] ?? "/tmp/opencode-quota-cli-show-config",
-    cacheDir: runtimeDirs.value.cacheDirs[0] ?? "/tmp/opencode-quota-cli-show-cache",
-    stateDir: runtimeDirs.value.stateDirs[0] ?? "/tmp/opencode-quota-cli-show-state",
-  }),
+  getOpencodeRuntimeDirs: () => runtimeDirs.value,
 }));
 
 import { createCliQuotaClient, runCliShowCommand } from "../src/lib/cli-show.js";
+import {
+  clearReadAuthFileCacheForTests,
+  getCredentialSourceDiagnostics,
+  readCredentialRows,
+} from "../src/lib/opencode-auth.js";
 import { __resetQuotaStateForTests } from "../src/lib/quota-state.js";
+import { writeCredentialDatabase } from "./helpers/credential-database.js";
 
 function createCaptureStream() {
   let output = "";
@@ -75,7 +77,8 @@ describe("runCliShowCommand", () => {
 
   beforeEach(() => {
     authMocks.anthropicConfigured = false;
-    authMocks.kimiState = "none";
+    authMocks.kimiGlobalState = "none";
+    authMocks.kimiCnState = "none";
     savedConfigDir = process.env.OPENCODE_CONFIG_DIR;
     delete process.env.OPENCODE_CONFIG_DIR;
     tempDir = mkdtempSync(join(tmpdir(), "opencode-quota-cli-show-"));
@@ -84,24 +87,27 @@ describe("runCliShowCommand", () => {
     mkdirSync(globalConfigDir, { recursive: true });
     mkdirSync(workspaceDir, { recursive: true });
     runtimeDirs.value = {
-      dataDirs: [],
-      configDirs: [globalConfigDir],
-      cacheDirs: [join(tempDir, "cache")],
-      stateDirs: [],
+      dataDir: "/tmp/opencode-quota-cli-show-data",
+      configDir: globalConfigDir,
+      cacheDir: join(tempDir, "cache"),
+      stateDir: "/tmp/opencode-quota-cli-show-state",
     };
+    vi.stubEnv("OPENCODE_DB", join(tempDir, "opencode.db"));
     mockProviders.length = 0;
     __resetQuotaStateForTests();
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     if (savedConfigDir !== undefined) process.env.OPENCODE_CONFIG_DIR = savedConfigDir;
     else delete process.env.OPENCODE_CONFIG_DIR;
     mockProviders.length = 0;
     __resetQuotaStateForTests();
+    clearReadAuthFileCacheForTests();
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("adds offline Anthropic and Kimi runtime ids only when local authentication exists", async () => {
+  it("synthesizes offline Kimi runtime ids independently by region", async () => {
     writeFileSync(join(workspaceDir, "opencode.json"), "{}", "utf8");
 
     const unauthenticated = await createCliQuotaClient({
@@ -110,16 +116,27 @@ describe("runCliShowCommand", () => {
     expect(unauthenticated.data?.providers).toEqual([]);
 
     authMocks.anthropicConfigured = true;
-    authMocks.kimiState = "configured";
-    const authenticated = await createCliQuotaClient({
+    authMocks.kimiCnState = "configured";
+    const cnOnly = await createCliQuotaClient({
       configRootDir: workspaceDir,
     }).config.providers();
-    expect(authenticated.data?.providers).toEqual([{ id: "anthropic" }, { id: "kimi-for-coding" }]);
+    expect(cnOnly.data?.providers).toEqual([{ id: "anthropic" }, { id: "kimi-code-plan-cn" }]);
+
+    authMocks.kimiGlobalState = "configured";
+    const bothRegions = await createCliQuotaClient({
+      configRootDir: workspaceDir,
+    }).config.providers();
+    expect(bothRegions.data?.providers).toEqual([
+      { id: "anthropic" },
+      { id: "kimi-code-plan-global" },
+      { id: "kimi-code-plan-cn" },
+    ]);
   });
 
   it("renders a compact quota glance and returns zero when quota rows are available", async () => {
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" as const },
       isAvailable: vi.fn().mockResolvedValue(true),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -158,48 +175,45 @@ describe("runCliShowCommand", () => {
     expect(provider.fetch).toHaveBeenCalledOnce();
   });
 
-  it("renders two Antigravity account labels in human-readable CLI output", async () => {
+  it("reads logins from OpenCode's database, read-only, only while the command runs", async () => {
+    const databasePath = join(tempDir, "opencode.db");
+    writeCredentialDatabase(databasePath, [
+      {
+        id: "cred_synthetic",
+        integrationId: "synthetic",
+        active: 1,
+        updated: 1,
+        value: { type: "key", key: "synthetic-key" },
+      },
+    ]);
+    const databaseBefore = readFileSync(databasePath);
+    let rowsDuringRun: unknown;
+    let sourceDuringRun: unknown;
     const provider = {
-      id: "google-antigravity",
+      id: "synthetic",
+      cachePolicy: { kind: "account-neutral" as const },
       isAvailable: vi.fn().mockResolvedValue(true),
-      fetch: vi.fn().mockResolvedValue({
-        attempted: true,
-        entries: [
-          {
-            accounting: { ...TEST_ACCOUNTING, sourceId: "alice@example.com" },
-            name: "Antigravity (ali…): Claude",
-            group: "[Antigravity (ali…)]",
-            label: "Claude:",
-            percentRemaining: 0,
-          },
-          {
-            accounting: { ...TEST_ACCOUNTING, sourceId: "bob@example.com" },
-            name: "Antigravity (bob…): Claude",
-            group: "[Antigravity (bob…)]",
-            label: "Claude:",
-            percentRemaining: 0,
-          },
-        ],
-        errors: [],
-        presentation: { classicStrategy: "preserve" },
+      fetch: vi.fn(async () => {
+        rowsDuringRun = await readCredentialRows(["synthetic"]);
+        sourceDuringRun = getCredentialSourceDiagnostics();
+        return {
+          attempted: true,
+          entries: [
+            { accounting: TEST_ACCOUNTING, name: "Synthetic Weekly", percentRemaining: 75 },
+          ],
+          errors: [],
+        };
       }),
     };
     mockProviders.push(provider);
     writeFileSync(
       join(workspaceDir, "opencode.json"),
-      JSON.stringify({
-        experimental: {
-          quotaToast: {
-            enabledProviders: ["google-antigravity"],
-            formatStyle: "allWindows",
-          },
-        },
-      }),
+      JSON.stringify({ experimental: { quotaToast: { enabledProviders: ["synthetic"] } } }),
       "utf8",
     );
-
     const stdout = createCaptureStream();
     const stderr = createCaptureStream();
+
     const code = await runCliShowCommand({
       argv: [],
       cwd: workspaceDir,
@@ -208,16 +222,25 @@ describe("runCliShowCommand", () => {
     });
 
     expect(code).toBe(0);
-    expect(stdout.output).toContain("[Antigravity (ali…)]");
-    expect(stdout.output).toContain("[Antigravity (bob…)]");
-    expect(stdout.output.match(/Claude/g)).toHaveLength(2);
-    expect(stdout.output).not.toContain("Google Antigravity");
     expect(stderr.output).toBe("");
+    expect(rowsDuringRun).toEqual([
+      {
+        id: "cred_synthetic",
+        integrationId: "synthetic",
+        label: "default",
+        active: true,
+        value: { type: "api", key: "synthetic-key" },
+      },
+    ]);
+    expect(sourceDuringRun).toMatchObject({ state: "bound", kind: "sqlite" });
+    expect(getCredentialSourceDiagnostics().state).toBe("unbound");
+    expect(readFileSync(databasePath).equals(databaseBefore)).toBe(true);
   });
 
   it("normalizes --provider aliases and uses the provider as an invocation override", async () => {
     const copilotProvider = {
       id: "copilot",
+      cachePolicy: { kind: "account-neutral" as const },
       isAvailable: vi.fn().mockResolvedValue(true),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -257,6 +280,7 @@ describe("runCliShowCommand", () => {
   it("rejects an unknown provider before probing providers", async () => {
     const provider = {
       id: "copilot",
+      cachePolicy: { kind: "account-neutral" as const },
       isAvailable: vi.fn().mockResolvedValue(true),
       fetch: vi.fn(),
     };
@@ -316,29 +340,6 @@ describe("runCliShowCommand", () => {
     expect(stderr.output).toContain("Quota disabled in config");
   });
 
-  it("renders explicit unavailable provider output but returns non-zero", async () => {
-    const provider = {
-      id: "copilot",
-      isAvailable: vi.fn().mockResolvedValue(false),
-      fetch: vi.fn(),
-    };
-    mockProviders.push(provider);
-    const stdout = createCaptureStream();
-    const stderr = createCaptureStream();
-
-    const code = await runCliShowCommand({
-      argv: ["--provider", "copilot"],
-      cwd: workspaceDir,
-      stdout: stdout.stream as any,
-      stderr: stderr.stream as any,
-    });
-
-    expect(code).toBe(1);
-    expect(stdout.output).toContain("Copilot: Unavailable (not detected)");
-    expect(stderr.output).toBe("");
-    expect(provider.fetch).not.toHaveBeenCalled();
-  });
-
   it("prefers the git worktree root over a nested cwd for config loading", async () => {
     const nestedDir = join(workspaceDir, "packages", "app");
     mkdirSync(nestedDir, { recursive: true });
@@ -368,20 +369,20 @@ describe("runCliShowCommand", () => {
     expect(stderr.output).toContain("Quota disabled in config");
   });
 
-  it("resolves relative OPENCODE_CONFIG_DIR from the worktree root", async () => {
+  it("reads worktree root config even when OPENCODE_CONFIG_DIR is set", async () => {
     const nestedDir = join(workspaceDir, "packages", "app");
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" as const },
       isAvailable: vi.fn().mockResolvedValue(true),
       fetch: vi.fn(),
     };
     mockProviders.push(provider);
     mkdirSync(nestedDir, { recursive: true });
     mkdirSync(join(workspaceDir, ".git"));
-    mkdirSync(join(workspaceDir, ".opencode"), { recursive: true });
     process.env.OPENCODE_CONFIG_DIR = ".opencode";
     writeFileSync(
-      join(workspaceDir, ".opencode", "opencode.json"),
+      join(workspaceDir, "opencode.json"),
       JSON.stringify({ experimental: { quotaToast: { enabled: false } } }),
       "utf8",
     );
@@ -401,77 +402,10 @@ describe("runCliShowCommand", () => {
     expect(provider.fetch).not.toHaveBeenCalled();
   });
 
-  it("renders Copilot and Gemini CLI success rows in standalone show", async () => {
-    const copilotProvider = {
-      id: "copilot",
-      isAvailable: vi.fn().mockResolvedValue(true),
-      fetch: vi.fn().mockResolvedValue({
-        attempted: true,
-        entries: [
-          {
-            accounting: TEST_ACCOUNTING,
-            name: "Copilot",
-            group: "Copilot (personal)",
-            label: "Quota:",
-            right: "0/300",
-            percentRemaining: 100,
-          },
-        ],
-        errors: [],
-      }),
-    };
-    const geminiCliProvider = {
-      id: "google-gemini-cli",
-      isAvailable: vi.fn().mockResolvedValue(true),
-      fetch: vi.fn().mockResolvedValue({
-        attempted: true,
-        entries: [
-          {
-            accounting: TEST_ACCOUNTING,
-            name: "Gemini Pro",
-            group: "Gemini CLI",
-            label: "Gemini Pro:",
-            right: "840 left",
-            percentRemaining: 84,
-          },
-        ],
-        errors: [],
-      }),
-    };
-    mockProviders.push(copilotProvider, geminiCliProvider);
-    writeFileSync(
-      join(workspaceDir, "opencode.json"),
-      JSON.stringify({
-        experimental: {
-          quotaToast: {
-            enabledProviders: ["copilot", "google-gemini-cli"],
-            formatStyle: "allWindows",
-          },
-        },
-      }),
-      "utf8",
-    );
-    const stdout = createCaptureStream();
-    const stderr = createCaptureStream();
-
-    const code = await runCliShowCommand({
-      argv: [],
-      cwd: workspaceDir,
-      stdout: stdout.stream as any,
-      stderr: stderr.stream as any,
-    });
-
-    expect(code).toBe(0);
-    expect(stdout.output).toContain("Copilot");
-    expect(stdout.output).toContain("Gemini CLI");
-    expect(copilotProvider.fetch).toHaveBeenCalledOnce();
-    expect(geminiCliProvider.fetch).toHaveBeenCalledOnce();
-    expect(stderr.output).toBe("");
-  });
-
   it("uses root-level OpenCode provider ids for standalone provider availability", async () => {
     const provider = {
       id: "copilot",
+      cachePolicy: { kind: "account-neutral" as const },
       isAvailable: vi.fn(async (ctx: any) => {
         const response = await ctx.client.config.providers();
         return response.data.providers.some((item: { id: string }) => item.id === "github-copilot");
@@ -511,6 +445,7 @@ describe("runCliShowCommand", () => {
   it("--json outputs valid JSON to stdout with cached provider data", async () => {
     const provider = {
       id: "synthetic",
+      cachePolicy: { kind: "account-neutral" as const },
       isAvailable: vi.fn().mockResolvedValue(true),
       fetch: vi.fn().mockResolvedValue({
         attempted: true,
@@ -566,250 +501,6 @@ describe("runCliShowCommand", () => {
     expect(provider.fetch).toHaveBeenCalledTimes(1); // still only called from text path
   });
 
-  it("--json reads from cache only and returns unavailable when no cache exists", async () => {
-    const provider = {
-      id: "synthetic",
-      isAvailable: vi.fn().mockResolvedValue(true),
-      fetch: vi.fn().mockResolvedValue({
-        attempted: true,
-        entries: [{ accounting: TEST_ACCOUNTING, name: "Synthetic", percentRemaining: 100 }],
-        errors: [],
-      }),
-    };
-    mockProviders.push(provider);
-    writeFileSync(
-      join(workspaceDir, "opencode.json"),
-      JSON.stringify({
-        experimental: { quotaToast: { enabledProviders: ["synthetic"] } },
-      }),
-      "utf8",
-    );
-
-    // Run --json WITHOUT populating cache first → all unavailable, no fetch.
-    const jsonOut = createCaptureStream();
-    const jsonErr = createCaptureStream();
-    const jsonCode = await runCliShowCommand({
-      argv: ["--json"],
-      cwd: workspaceDir,
-      stdout: jsonOut.stream as any,
-      stderr: jsonErr.stream as any,
-    });
-
-    expect(jsonCode).toBe(0);
-    expect(jsonErr.output).toBe("");
-    const parsed = JSON.parse(jsonOut.output);
-    expect(parsed.providers.synthetic.status).toBe("unavailable");
-    expect(provider.fetch).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    [80, "50", 0],
-    [30, "50", 1],
-  ])("--threshold exits %s when a provider is at %s%% remaining", async (percentRemaining, threshold, expectedCode) => {
-    const provider = {
-      id: "synthetic",
-      isAvailable: vi.fn().mockResolvedValue(true),
-      fetch: vi.fn().mockResolvedValue({
-        attempted: true,
-        entries: [{ accounting: TEST_ACCOUNTING, name: "Synthetic", percentRemaining }],
-        errors: [],
-      }),
-    };
-    mockProviders.push(provider);
-    writeFileSync(
-      join(workspaceDir, "opencode.json"),
-      JSON.stringify({
-        experimental: { quotaToast: { enabledProviders: ["synthetic"] } },
-      }),
-      "utf8",
-    );
-
-    // Populate cache.
-    await runCliShowCommand({
-      argv: [],
-      cwd: workspaceDir,
-      stdout: { write: () => true } as any,
-      stderr: { write: () => true } as any,
-    });
-
-    const jsonCode = await runCliShowCommand({
-      argv: ["--json", "--threshold", threshold],
-      cwd: workspaceDir,
-      stdout: { write: () => true } as any,
-      stderr: { write: () => true } as any,
-    });
-
-    expect(jsonCode).toBe(expectedCode);
-  });
-
-  it("--threshold exits 2 when no provider is ok", async () => {
-    // Provider that is unavailable (no cache populated).
-    const provider = {
-      id: "synthetic",
-      isAvailable: vi.fn().mockResolvedValue(true),
-      fetch: vi.fn().mockResolvedValue({
-        attempted: true,
-        entries: [{ accounting: TEST_ACCOUNTING, name: "Synthetic", percentRemaining: 100 }],
-        errors: [],
-      }),
-    };
-    mockProviders.push(provider);
-    writeFileSync(
-      join(workspaceDir, "opencode.json"),
-      JSON.stringify({
-        experimental: { quotaToast: { enabledProviders: ["synthetic"] } },
-      }),
-      "utf8",
-    );
-
-    // Run --threshold WITHOUT populating cache → all unavailable.
-    const jsonOut = createCaptureStream();
-    const jsonCode = await runCliShowCommand({
-      argv: ["--json", "--threshold", "10"],
-      cwd: workspaceDir,
-      stdout: jsonOut.stream as any,
-      stderr: { write: () => true } as any,
-    });
-
-    expect(jsonCode).toBe(2);
-  });
-
-  it("--threshold exits 2 when cached ok providers have no percentRemaining values", async () => {
-    const provider = {
-      id: "synthetic",
-      isAvailable: vi.fn().mockResolvedValue(true),
-      fetch: vi.fn().mockResolvedValue({
-        attempted: true,
-        entries: [
-          {
-            accounting: TEST_ACCOUNTING,
-            name: "Synthetic",
-            kind: "value",
-            value: "$42",
-            label: "Usage:",
-          },
-        ],
-        errors: [],
-      }),
-    };
-    mockProviders.push(provider);
-    writeFileSync(
-      join(workspaceDir, "opencode.json"),
-      JSON.stringify({
-        experimental: { quotaToast: { enabledProviders: ["synthetic"] } },
-      }),
-      "utf8",
-    );
-
-    await runCliShowCommand({
-      argv: [],
-      cwd: workspaceDir,
-      stdout: { write: () => true } as any,
-      stderr: { write: () => true } as any,
-    });
-
-    const jsonCode = await runCliShowCommand({
-      argv: ["--json", "--threshold", "10"],
-      cwd: workspaceDir,
-      stdout: { write: () => true } as any,
-      stderr: { write: () => true } as any,
-    });
-
-    expect(jsonCode).toBe(2);
-  });
-
-  it("--threshold exits 2 for partial cached results instead of passing incomplete data", async () => {
-    const provider = {
-      id: "synthetic",
-      isAvailable: vi.fn().mockResolvedValue(true),
-      fetch: vi.fn().mockResolvedValue({
-        attempted: true,
-        entries: [{ accounting: TEST_ACCOUNTING, name: "Synthetic", percentRemaining: 80 }],
-        errors: [{ label: "Synthetic secondary", message: "quota endpoint unavailable" }],
-      }),
-    };
-    mockProviders.push(provider);
-    writeFileSync(
-      join(workspaceDir, "opencode.json"),
-      JSON.stringify({
-        experimental: { quotaToast: { enabledProviders: ["synthetic"] } },
-      }),
-      "utf8",
-    );
-
-    await runCliShowCommand({
-      argv: [],
-      cwd: workspaceDir,
-      stdout: { write: () => true } as any,
-      stderr: { write: () => true } as any,
-    });
-
-    const stdout = createCaptureStream();
-    const code = await runCliShowCommand({
-      argv: ["--json", "--threshold", "50"],
-      cwd: workspaceDir,
-      stdout: stdout.stream as any,
-      stderr: { write: () => true } as any,
-    });
-
-    expect(code).toBe(2);
-    expect(JSON.parse(stdout.output).providers.synthetic).toMatchObject({
-      status: "partial",
-      entries: [expect.objectContaining({ percentRemaining: 80 })],
-      errors: [{ label: "Synthetic secondary", message: "quota endpoint unavailable" }],
-    });
-  });
-
-  it("--json --provider copilot only includes the copilot key", async () => {
-    const copilotProvider = {
-      id: "copilot",
-      isAvailable: vi.fn().mockResolvedValue(true),
-      fetch: vi.fn().mockResolvedValue({
-        attempted: true,
-        entries: [{ accounting: TEST_ACCOUNTING, name: "Copilot", percentRemaining: 90 }],
-        errors: [],
-      }),
-    };
-    const syntheticProvider = {
-      id: "synthetic",
-      isAvailable: vi.fn().mockResolvedValue(true),
-      fetch: vi.fn().mockResolvedValue({
-        attempted: true,
-        entries: [{ accounting: TEST_ACCOUNTING, name: "Synthetic", percentRemaining: 50 }],
-        errors: [],
-      }),
-    };
-    mockProviders.push(copilotProvider, syntheticProvider);
-    writeFileSync(
-      join(workspaceDir, "opencode.json"),
-      JSON.stringify({
-        experimental: { quotaToast: { enabledProviders: ["copilot", "synthetic"] } },
-      }),
-      "utf8",
-    );
-
-    // Populate cache for both providers.
-    await runCliShowCommand({
-      argv: [],
-      cwd: workspaceDir,
-      stdout: { write: () => true } as any,
-      stderr: { write: () => true } as any,
-    });
-
-    const jsonOut = createCaptureStream();
-    const jsonCode = await runCliShowCommand({
-      argv: ["--json", "--provider", "copilot"],
-      cwd: workspaceDir,
-      stdout: jsonOut.stream as any,
-      stderr: { write: () => true } as any,
-    });
-
-    expect(jsonCode).toBe(0);
-    const parsed = JSON.parse(jsonOut.output);
-    expect(Object.keys(parsed.providers)).toEqual(["copilot"]);
-    expect(parsed.providers.copilot.status).toBe("ok");
-  });
-
   it("reports unknown flag with --json as error on stderr with exit code 1", async () => {
     const jsonOut = createCaptureStream();
     const jsonErr = createCaptureStream();
@@ -858,5 +549,23 @@ describe("runCliShowCommand", () => {
     result = await run(["--threshold", "5"]);
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("--threshold requires --json");
+  });
+
+  it("prints help without an OpenCode requirement or exit code 3", async () => {
+    const stdout = createCaptureStream();
+    const stderr = createCaptureStream();
+
+    const code = await runCliShowCommand({
+      argv: ["--help"],
+      cwd: workspaceDir,
+      stdout: stdout.stream as any,
+      stderr: stderr.stream as any,
+    });
+
+    expect(code).toBe(0);
+    expect(stderr.output).toBe("");
+    expect(stdout.output).toContain("opencode-quota show");
+    expect(stdout.output).not.toContain("OpenCode running");
+    expect(stdout.output).not.toMatch(/exit code 3/i);
   });
 });

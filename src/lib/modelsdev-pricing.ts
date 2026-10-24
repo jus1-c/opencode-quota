@@ -236,6 +236,20 @@ function hasSnapshotData(snapshot: PricingSnapshot): boolean {
   return snapshot._meta.generatedAt > 0;
 }
 
+// A runtime snapshot saved by an older version may lack models that models.dev
+// stopped listing. Fill them from the bundled file on every load, so a fresh
+// runtime snapshot doesn't hide them until its next refresh.
+function withBundledRetiredModels(
+  runtime: PricingSnapshot,
+  bundled: PricingSnapshot,
+): PricingSnapshot {
+  return keepRetiredModels({
+    current: runtime,
+    previous: [bundled],
+    providerIDs: DEFAULT_MODELSDEV_PROVIDERS,
+  });
+}
+
 function chooseSnapshot(params?: {
   runtimeDirs?: OpencodeRuntimeDirs;
   bootstrapSnapshotOverride?: PricingSnapshot;
@@ -254,7 +268,7 @@ function chooseSnapshot(params?: {
 
   if (selection === "runtime") {
     if (runtime) {
-      return { snapshot: runtime, source: "runtime" };
+      return { snapshot: withBundledRetiredModels(runtime, bundled), source: "runtime" };
     }
     if (hasSnapshotData(bundled)) {
       return { snapshot: bundled, source: "bundled" };
@@ -263,7 +277,7 @@ function chooseSnapshot(params?: {
   }
 
   if (runtime && runtime._meta.generatedAt >= bundled._meta.generatedAt) {
-    return { snapshot: runtime, source: "runtime" };
+    return { snapshot: withBundledRetiredModels(runtime, bundled), source: "runtime" };
   }
 
   if (hasSnapshotData(bundled)) {
@@ -434,6 +448,42 @@ function buildSnapshotFromApi(
   };
 }
 
+/**
+ * models.dev drops retired models from its list. Keep their last known price so
+ * older usage still gets a cost. `current` wins, then `previous` in the order given.
+ * Callers list the user's runtime snapshot before the bundled one: its prices come
+ * from the user's own last download, while the bundled file's date only says when
+ * the file was rewritten, not when a kept model's price was last seen.
+ */
+function keepRetiredModels(params: {
+  current: PricingSnapshot;
+  previous: Array<PricingSnapshot | null>;
+  providerIDs: string[];
+}): PricingSnapshot {
+  const previous = params.previous.filter(
+    (snapshot): snapshot is PricingSnapshot => snapshot !== null,
+  );
+  const providers = { ...params.current.providers };
+
+  for (const providerID of params.providerIDs) {
+    const models = { ...(providers[providerID] ?? {}) };
+    for (const snapshot of previous) {
+      for (const [modelID, cost] of Object.entries(snapshot.providers[providerID] ?? {})) {
+        if (!models[modelID]) models[modelID] = cost;
+      }
+    }
+    if (Object.keys(models).length > 0) {
+      providers[providerID] = sortRecordByKeys(models);
+    }
+  }
+
+  const sortedProviders = sortRecordByKeys(providers);
+  return {
+    _meta: { ...params.current._meta, providers: Object.keys(sortedProviders) },
+    providers: sortedProviders,
+  };
+}
+
 function countPricedModels(snapshot: PricingSnapshot): number {
   let total = 0;
   for (const models of Object.values(snapshot.providers)) {
@@ -513,8 +563,10 @@ export async function maybeRefreshPricingSnapshot(
     const selection = opts.snapshotSelection ?? SNAPSHOT_SELECTION;
     const allowRefreshWhenSelectionBundled = opts.allowRefreshWhenSelectionBundled === true;
 
+    const providerIDs = opts.providerAllowlist ?? DEFAULT_MODELSDEV_PROVIDERS;
     const previousState = (await readRefreshState(statePath)) ?? makeDefaultRefreshState(nowMs);
     const runtimeSnapshotBeforeRefresh = loadRuntimeSnapshotSync(runtimeDirs);
+    const bundledSnapshot = loadBundledSnapshotSync(opts.bootstrapSnapshotOverride);
 
     applySnapshotSelection({
       runtimeDirs,
@@ -606,13 +658,18 @@ export async function maybeRefreshPricingSnapshot(
 
       if (fetchResult.kind === "not_modified") {
         const baseSnapshot = runtimeSnapshotBeforeRefresh ?? ensureLoaded();
-        const refreshedSnapshot: PricingSnapshot = {
-          _meta: {
-            ...baseSnapshot._meta,
-            generatedAt: nowMs,
+        // Also heals runtime snapshots written before retired models were kept.
+        const refreshedSnapshot = keepRetiredModels({
+          current: {
+            _meta: {
+              ...baseSnapshot._meta,
+              generatedAt: nowMs,
+            },
+            providers: baseSnapshot.providers,
           },
-          providers: baseSnapshot.providers,
-        };
+          previous: [bundledSnapshot],
+          providerIDs,
+        });
         await writeJsonAtomic(snapshotPath, refreshedSnapshot, { trailingNewline: true });
         applySnapshotSelection({
           runtimeDirs,
@@ -641,14 +698,15 @@ export async function maybeRefreshPricingSnapshot(
         };
       }
 
-      const snapshot = buildSnapshotFromApi(
-        fetchResult.api,
-        opts.providerAllowlist ?? DEFAULT_MODELSDEV_PROVIDERS,
-        nowMs,
-      );
-      if (countPricedModels(snapshot) === 0) {
+      const fetchedSnapshot = buildSnapshotFromApi(fetchResult.api, providerIDs, nowMs);
+      if (countPricedModels(fetchedSnapshot) === 0) {
         throw new Error("Refusing to persist empty pricing snapshot from models.dev");
       }
+      const snapshot = keepRetiredModels({
+        current: fetchedSnapshot,
+        previous: [runtimeSnapshotBeforeRefresh, bundledSnapshot],
+        providerIDs,
+      });
 
       await writeJsonAtomic(snapshotPath, snapshot, { trailingNewline: true });
       applySnapshotSelection({

@@ -1,62 +1,63 @@
 name: Feature request
 description: Propose a new feature or behavior change
-title: "[feature]: "
 labels:
   - enhancement
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for the idea. Please keep the proposal scoped and concrete.
-        Review `CONTRIBUTING.md` for contribution expectations.
-        Inactive issues may be marked stale after 23 days and closed 7 days later if there are still no updates.
+        Ideas that change what you see on screen go to [#293](https://github.com/slkiser/opencode-quota/issues/293).
 
-  - type: checkboxes
-    id: checks
+        Something broken? Use **Bug report**.
+
+        New provider? Use **Provider request**.
+
+  - type: dropdown
+    id: display_change
     attributes:
-      label: Pre-flight checks
+      label: Does this change what you see on screen?
+      description: For example a new row, color, or layout in the sidebar, pop-ups, or the line under the message box.
       options:
-        - label: I searched existing issues and did not find a duplicate request.
-          required: true
-        - label: I reviewed current behavior on the production released OpenCode version.
-          required: true
+        - "No"
+        - "Yes"
+        - Not sure
+    validations:
+      required: true
 
   - type: input
     id: opencode_version
     attributes:
-      label: OpenCode version reviewed
-      description: Example `1.2.15`
-      placeholder: 1.2.15
+      label: Your OpenCode version
+      description: Example `2.0.20`
+      placeholder: 2.0.20
+    validations:
+      required: true
+
+  - type: input
+    id: plugin_version
+    attributes:
+      label: Your plugin version
+      description: Run `/quota_status` in OpenCode. The version is in the first line. If it has `beta` in it, update first, because it may already work.
+      placeholder: 5.0.1
     validations:
       required: true
 
   - type: textarea
     id: problem
     attributes:
-      label: Problem statement
-      description: What problem are you trying to solve?
+      label: What's the problem?
     validations:
       required: true
 
   - type: textarea
     id: proposal
     attributes:
-      label: Proposed change
-      description: Describe the minimal safe change you want.
+      label: What would you like to happen?
+      description: A sketch or screenshot helps. Drag it into this box.
     validations:
       required: true
 
   - type: textarea
     id: alternatives
     attributes:
-      label: Alternatives considered
-      description: Optional, but useful for tradeoffs.
-
-  - type: textarea
-    id: acceptance
-    attributes:
-      label: Acceptance criteria
-      description: "Optional: list what must be true for this request to be considered done."
-      placeholder: |
-        - [ ] ...
-        - [ ] ...
+      label: Other ideas you thought about (optional)

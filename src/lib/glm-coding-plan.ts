@@ -21,9 +21,11 @@ type GlmCodingPlanDescriptor = {
 
 export async function queryGlmCodingPlanQuota(
   descriptor: GlmCodingPlanDescriptor,
-  options: { requestTimeoutMs?: number } = {},
+  options: { requestTimeoutMs?: number; apiKey?: string } = {},
 ): Promise<ZaiResult> {
-  const auth = await descriptor.resolveAuth();
+  const auth = options.apiKey
+    ? { state: "configured" as const, apiKey: options.apiKey }
+    : await descriptor.resolveAuth();
   if (auth.state === "none") return null;
   if (auth.state === "invalid") return { success: false, error: auth.error };
 
@@ -73,10 +75,25 @@ export async function queryGlmCodingPlanQuota(
             resetDate && Number.isFinite(resetDate.valueOf()) && resetDate.valueOf() > 0
               ? resetDate.toISOString()
               : undefined;
-          const window = { percentRemaining: clampPercent(100 - limit.percentage), resetTimeIso };
+          let percentRemaining = clampPercent(100 - limit.percentage);
+          if (
+            limit.type === "CREDIT_LIMIT" &&
+            typeof limit.usage === "number" &&
+            Number.isFinite(limit.usage) &&
+            limit.usage > 0 &&
+            typeof limit.currentValue === "number" &&
+            Number.isFinite(limit.currentValue) &&
+            limit.currentValue >= 0
+          ) {
+            percentRemaining = clampPercent(
+              ((limit.usage - limit.currentValue) / limit.usage) * 100,
+            );
+          }
+          const window = { percentRemaining, resetTimeIso };
 
-          if (limit.type === "TOKENS_LIMIT" && limit.unit === 3) windows.fiveHour = window;
-          else if (limit.type === "TOKENS_LIMIT" && limit.unit === 6) windows.weekly = window;
+          const isQuotaWindow = limit.type === "TOKENS_LIMIT" || limit.type === "CREDIT_LIMIT";
+          if (isQuotaWindow && limit.unit === 3) windows.fiveHour = window;
+          else if (isQuotaWindow && limit.unit === 6) windows.weekly = window;
           else if (limit.type === "TIME_LIMIT") windows.mcp = window;
         }
 

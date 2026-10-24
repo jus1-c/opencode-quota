@@ -6,7 +6,7 @@ import { writeJsonAtomic } from "./atomic-json.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import { clampPercent } from "./format-utils.js";
 import { fetchWithTimeout } from "./http.js";
-import { getAuthPaths, readAuthFile } from "./opencode-auth.js";
+import { getCredentialDatabasePaths, readAuthFile } from "./opencode-auth.js";
 import { getOpencodeRuntimeDirs, type OpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
 import type { QuotaError } from "./types.js";
 
@@ -19,6 +19,8 @@ type VilaoState = {
   version: 1;
   accountFingerprint: string;
   baselineCents: number;
+  /** Balance seen on the previous successful read; a rise resets the baseline. */
+  lastBalanceCents: number;
   updatedAt: number;
 };
 
@@ -107,7 +109,13 @@ async function updateBaseline(
     ) {
       throw new Error("Vilao balance baseline state is invalid; remove it to start a new baseline");
     }
-    baselineCents = Math.max(savedBaseline, balanceCents);
+    // State written before lastBalanceCents existed keeps its baseline and
+    // treats this read as the previous balance.
+    const lastBalanceCents =
+      Number.isInteger(saved.lastBalanceCents) && Number(saved.lastBalanceCents) >= 0
+        ? Number(saved.lastBalanceCents)
+        : balanceCents;
+    baselineCents = balanceCents > lastBalanceCents ? balanceCents : savedBaseline;
   } catch (error) {
     const code =
       error && typeof error === "object" && "code" in error
@@ -125,6 +133,7 @@ async function updateBaseline(
       version: STATE_VERSION,
       accountFingerprint,
       baselineCents,
+      lastBalanceCents: balanceCents,
       updatedAt: dependencies.nowMs ?? Date.now(),
     });
     return { baselineCents, path };
@@ -146,7 +155,7 @@ export async function queryVilaoQuota(
   options: { requestTimeoutMs?: number } = {},
   dependencies: VilaoDependencies = {},
 ): Promise<VilaoQuotaResult> {
-  const pat = patFromAuth(await readAuthFile());
+  const pat = patFromAuth(await readAuthFile({ integrationIds: ["vilao"] }));
   if (!pat) return null;
 
   try {
@@ -195,7 +204,7 @@ export async function queryVilaoQuota(
 
 export async function hasVilaoPat(): Promise<boolean> {
   try {
-    return Boolean(patFromAuth(await readAuthFile()));
+    return Boolean(patFromAuth(await readAuthFile({ integrationIds: ["vilao"] })));
   } catch {
     return false;
   }
@@ -203,7 +212,7 @@ export async function hasVilaoPat(): Promise<boolean> {
 
 export async function getVilaoCacheIdentity(): Promise<string | undefined> {
   try {
-    const pat = patFromAuth(await readAuthFile());
+    const pat = patFromAuth(await readAuthFile({ integrationIds: ["vilao"] }));
     return pat ? fingerprint(pat) : undefined;
   } catch {
     return undefined;
@@ -218,7 +227,7 @@ export async function getVilaoAuthDiagnostics(): Promise<{
   const identity = await getVilaoCacheIdentity();
   return {
     configured: Boolean(identity),
-    authPaths: getAuthPaths(),
+    authPaths: getCredentialDatabasePaths(),
     statePath: identity
       ? statePath(identity)
       : join(getOpencodeRuntimeDirs().stateDir, "quota-vilao-balance-<account>.json"),

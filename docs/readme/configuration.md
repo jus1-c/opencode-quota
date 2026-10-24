@@ -2,107 +2,146 @@
 
 # Configuration
 
-Most people only need the examples on this page. The full option list is at the bottom.
+Most people only need the table below. Every option is listed at the bottom.
 
 ## Where settings live
 
-OpenCode Quota normally keeps its settings in one separate file:
+Settings go in one separate file:
 
 - Project install: `<your-repo>/opencode-quota/quota-toast.jsonc`
-- Global install: usually `~/.config/opencode/opencode-quota/quota-toast.jsonc`
-- Custom config directory: `$OPENCODE_CONFIG_DIR/opencode-quota/quota-toast.jsonc`
+- Global install: `~/.config/opencode/opencode-quota/quota-toast.jsonc` on every OS (`$XDG_CONFIG_HOME/opencode/...` when `XDG_CONFIG_HOME` is set)
+- Custom config folder: `$OPENCODE_CONFIG_DIR/opencode-quota/quota-toast.jsonc` (replaces the global folder, like OpenCode 2)
 
-Strict `.json` files also work. Run `/quota_status` if you are unsure which file is active.
-
-`opencode.jsonc` loads the main plugin. `tui.jsonc` loads TUI features. Put the settings below in `quota-toast.jsonc`, not `tui.jsonc`.
+Strict `.json` files also work. Not sure which file is active? Run `/quota_status`. Restart OpenCode after changing the file.
 
 ## Common changes
 
-| You want                                   | Setting                       |
-| ------------------------------------------ | ----------------------------- |
-| Find providers automatically               | `enabledProviders: "auto"`    |
-| Show every reset period                    | `formatStyle: "allWindows"`   |
-| Show one quota window per provider         | `formatStyle: "singleWindow"` |
-| Show quota used instead of left            | `percentDisplayMode: "used"`  |
-| Show slash results with messages           | `tuiCommandDisplay: "inline"` |
-| Show slash results in a TUI popup          | `tuiCommandDisplay: "dialog"` |
-| Turn the TUI sidebar on or off             | `tuiSidebarPanel.enabled`     |
-| Turn popup quota notifications on or off   | `enableToast`                 |
-| Turn the compact quota line on or off      | `tuiCompactStatus.enabled`    |
-| Show or hide session input/output tokens   | `showSessionTokens`           |
-| Include descendant/subagent session tokens | `sessionTokenScope: "tree"`   |
+| You want                                    | Setting                                     |
+| ------------------------------------------- | ------------------------------------------- |
+| Find providers automatically                | `enabledProviders: "auto"`                  |
+| Pick providers yourself                     | `enabledProviders: ["copilot", "openai"]`   |
+| Show every reset period                     | `formatStyle: "allWindows"`                 |
+| Show one quota window per provider          | `formatStyle: "singleWindow"`               |
+| Show quota used instead of left             | `percentDisplayMode: "used"`                |
+| Estimate when fixed quota runs out          | `quotaProjection: "runway"`                 |
+| Show `81%` instead of `81% left`            | `percentLabelStyle: "bare"`                 |
+| Show `2d5h14m` instead of `2d 5h 14m`       | `resetTimeSpaced: false`                    |
+| Show reset countdowns as decimals (`5.7d`)  | `resetTimeDecimals: 1`                      |
+| Show extra accounting rows                  | `accountingDetail: "detailed"`              |
+| Keep TUI slash reports in the chat          | `tuiCommandDisplay: "inline"`               |
+| Turn the TUI sidebar on or off              | `tuiSidebarPanel.enabled`                   |
+| Pick OpenCode Go's collapsed-sidebar row    | `tuiSidebarPanel.opencodeGoPreferredWindow` |
+| Turn popup quota notifications on or off    | `enableToast`                               |
+| Get a popup when weekly quota resets        | `resetNotifications.enabled`                |
+| Turn the compact quota line on or off       | `tuiCompactStatus.enabled`                  |
+| Show a quota bar under the prompt           | `tuiPromptBar.enabled`                      |
+| Show or hide session input/output tokens    | `showSessionTokens`                         |
+| Include subagent session tokens             | `sessionTokenScope: "tree"`                 |
+| Allow more time for provider requests       | `requestTimeoutMs: 12000`                   |
+| Write quota JSON for another tool           | `export.enabled: true`                      |
+| Keep OpenCode's normal retry after a limit  | `waitForQuotaReset: false`                  |
 
-The installer chooses `allWindows` by default. If the setting is absent, the built-in default is `singleWindow`.
+The installer picks `allWindows`. If the setting is missing, the default is `singleWindow`.
 
-### Example
+Example:
 
 ```jsonc
 {
-  // Find providers from OpenCode configuration and authentication.
-  "enabledProviders": "auto",
-
-  // Show every quota reset period as percentage remaining.
+  "enabledProviders": ["copilot", "openai", "google-agy"],
   "formatStyle": "allWindows",
   "percentDisplayMode": "remaining",
-
-  // Keep TUI slash-command results with normal messages.
+  "quotaProjection": "runway",
   "tuiCommandDisplay": "inline",
-
-  // Show the sidebar, but not toast or compact status.
-  "tuiSidebarPanel": { "enabled": true },
+  "tuiSidebarPanel": { "enabled": true, "opencodeGoPreferredWindow": "rolling" },
   "enableToast": false,
-  "tuiCompactStatus": { "enabled": false },
+  "tuiCompactStatus": { "enabled": true, "homeBottom": true, "sessionPrompt": false },
+  "tuiPromptBar": { "enabled": true },
 }
 ```
 
-Restart OpenCode after changing the file.
+### Show accounting detail
+
+`accountingDetail` has two values:
+
+- `"summary"` (default): main rows only, with at most one supporting detail per percentage row.
+- `"detailed"`: also shows supplementary rows and, on wide output, separate `Used`, `Limit`, and `Remaining` values.
+
+It applies to `/quota`, terminal `show`, popup toasts, the sidebar, the compact line, and the prompt bar. Narrow layouts may drop detail rather than cut off a money value; the prompt bar always shows one main row. It is separate from `formatStyle` (which windows) and `percentDisplayMode` (used or left). `Used`, `Limit`, and `Remaining` always mean exactly that, in either mode. A change applies right away to data already fetched.
+
+### Estimate when fixed quota runs out
+
+`quotaProjection: "runway"` (off by default) adds a **Runs out** estimate to eligible rows on `/quota`, terminal `show`, popup toasts, the expanded sidebar, the compact line, and the prompt bar.
+
+- It is a straight-line average since the fixed window began: used percentage divided by time passed. It is not a recent-rate forecast. `percentDisplayMode` does not change it.
+- Full displays say **Runs out ≈ 1h 50m**; the compact line and prompt bar say **r/o ≈ 1h 50m**. Partial minutes round up. If your current pace lasts past the reset, it says **lasts past reset**. The reset countdown stays separate.
+- It uses cached data, makes no extra provider requests, and adds nothing to the JSON export.
+
+Only rows with a known fixed window start, end, and full reset qualify. Labels such as Five-hour, Weekly, Monthly, or RPM never qualify a row by themselves:
+
+- **OpenAI:** known 5-hour, weekly, or monthly rate-limit windows with `limit_window_seconds` and an exact reset. Spend-control rows, code-review rows, and unknown durations are excluded.
+- **xAI:** credit periods with both `currentPeriod.start` and `currentPeriod.end`. A billing-end date without a start is excluded.
+- **Cursor:** the included API budget when `cursorBillingCycleStartDay` is set. The calendar-month fallback, partial or unknown model spend, and spend-only rows are excluded.
+- **Custom local estimates:** `utc-day` request and priced budget percentages. `rolling` windows and unpriced rows are excluded.
+
+Everything else (rolling windows, RPM, balance, status, unlimited rows) is left unchanged.
+
+### Notify when quota becomes available again
+
+```jsonc
+{
+  "resetNotifications": { "enabled": true, "windows": ["weekly"] },
+}
+```
+
+- Off by default. It reuses data already fetched, so it adds no provider requests.
+- A popup appears only after OpenCode Quota sees the reset time pass, a newer reset time, and more quota left. The same reset is never announced twice, even after a restart.
+- It shows as a second popup right after the quota toast, so it needs `enableToast` and a toast trigger (`showOnIdle`, `showOnCompact`, or `showOnQuestion`). It never appears anywhere else.
+- Windows: `fiveHour`, `hourly`, `daily`, `weekly`, `monthly`, and `yearly`.
+- Its state file stores only hashed (SHA-256) account keys, remaining percentages, and timestamps, never account names, labels, or credentials.
 
 ### Include subagent session tokens
 
-Session totals use only the current session by default. To include the current session and every descendant or subagent session once:
+Session totals count only the current session by default. `sessionTokenScope: "tree"` adds every subagent session, counted once. This applies to the session tokens in `/quota`, popup toasts, the sidebar, and the compact line. It does not change `/tokens_session` or `/tokens_session_all`.
 
-```jsonc
-{
-  "showSessionTokens": true,
-  "sessionTokenScope": "tree",
-}
-```
+### Countdown and label styles
 
-This scope applies to the embedded session-token output in `/quota` on Web and TUI, popup toasts, the TUI sidebar, and the compact line below the message input. It does not change `/tokens_session` or `/tokens_session_all`; those commands keep their explicit current-session and session-tree meanings.
+- Reset countdowns are exact and spaced by default, such as `6d 1h 17m`, `2h 14m`, or `37m`. Partial minutes round up.
+- `resetTimeSpaced: false` writes `2d5h14m` instead of `2d 5h 14m`. Minute-only values, `reset`, and rounding stay the same. It applies to `/quota`, popup toasts, terminal `show`, the sidebar, the compact line, and the prompt bar.
+- `resetTimeDecimals` (`0` to `4`) shows the largest unit as a decimal, such as `5.7d` or `1.4h`, in popup toasts, the sidebar, terminal `show`, and the prompt bar. It wins over `resetTimeSpaced` where it applies.
+- `percentLabelStyle: "bare"` shows `81%` instead of `81% left` (or `19%` instead of `19% used`). Full reports and the sidebar then show `Quota [Remaining]` or `Quota [Used]` as the heading, and the sidebar gives the freed space to its bars. The compact line and prompt bar are always bare.
 
 ## Custom providers
 
-A custom provider connects OpenCode Quota to a provider that is not built in, or lets you tune a maintained local estimate.
-
-Use the guided command:
+A custom provider connects OpenCode Quota to a provider that is not built in, or tunes a maintained local estimate. Use the guided command:
 
 ```bash
 npx @slkiser/opencode-quota@latest provider add
 ```
 
-It asks what kind of provider you have, previews the complete canonical merged global config, and asks before writing. It never asks for a response body, credential, or secret value. For `json-v1`, it guides you through the optional rows path and each mapping one field at a time. The same schema validator used at startup checks the constructed adapter before the preview.
+- It asks what kind of provider you have, previews the full merged global config, and asks before writing. It never asks for a response body, credential, or secret.
+- For `json-v1`, it walks you through the optional rows path and each mapping one field at a time, and checks the result with the same validator used at startup.
+- It writes to the global `quota-toast.jsonc` or `.json` if one exists, otherwise to the global `opencode.jsonc` or `.json`. Project definitions are not allowed.
 
-The command updates the active global quota config. If a global `quota-toast.jsonc` or `.json` exists, it uses that file. Otherwise it uses the global `opencode.jsonc` or `.json`. Project custom-provider definitions are not allowed.
+Rules:
+
+- `quotaProviders` is global-only and keeps file order.
+- `id` is the stable identity. Add `providerId` only when it differs.
+- `modelIds` affects only `onlyCurrentModel`. Use exact, case-sensitive model IDs without the outer provider prefix, or omit it to cover every model for that provider.
+- Remote APIs use a fixed authenticated `GET`. Formats: `quota-v1`, `json-v1`, and `openrouter-key-v1`. `json-v1` needs an `adapter` with 1–16 mappings; paths are literal own-property segment arrays, not JSONPath. See [response rules](providers.md#custom-providers).
+- Local estimates support 1–16 UTC-day or rolling request windows. Counters live under `~/.local/state/opencode/opencode-quota/quota-providers/`.
+- Automatic models.dev matching runs first. Add `pricingModelMap` only when it cannot find one clear model. `pricingModelMap` cannot override a successful automatic match.
+- If any request cannot be priced, request counts stay visible and the budget percentage is reported unavailable.
+- Credentials resolve from `apiKeyEnv`, trusted global `provider.<providerId>.options.apiKey`, then API-key logins saved in OpenCode 2 (`opencode.db`).
+- Definitions run automatically with `enabledProviders: "auto"`. A manual list must include `quota-providers` and every built-in provider you still want.
+- To tune maintained estimates, use the reserved `alibaba-coding-plan` ID and its window shape. Do not add a duplicate normal provider block.
+- Not accepted: project secrets, scripts, methods, custom headers, templates, executable mappings, regular expressions, JSONPath, and automatic endpoint discovery.
+- A custom model provider still needs its normal OpenCode `provider` block: that block tells OpenCode how to use the model, and `quotaProviders` tells OpenCode Quota how to measure it.
+- `/quota_status` shows the exact state path and safe credential source, never URLs, keys, headers, response bodies, counter contents, or raw errors.
 
 <details>
-<summary><strong>How custom providers work</strong></summary>
+<summary><strong>Complete example (no separate quota settings file)</strong></summary>
 
-- **Remote API:** reads real quota data from a supported HTTPS endpoint.
-- **Local estimate:** counts matching OpenCode requests and can estimate spend.
-- OpenCode Quota tries models.dev pricing automatically.
-- Add `pricingModelMap` only when automatic matching cannot find one clear model.
-- Generated counters live under `~/.local/state/opencode/opencode-quota/`.
-
-A custom model provider still needs its normal OpenCode `provider` block. That block tells OpenCode how to use the model; `quotaProviders` tells OpenCode Quota how to measure it.
-
-</details>
-
-<details>
-<summary><strong>Complete fallback example</strong></summary>
-
-When no separate quota settings file exists, the guided command uses the global OpenCode config.
-
-The command writes the `experimental.quotaToast.quotaProviders` section. Configure the normal OpenCode `provider` block separately:
+Without a `quota-toast` file, the guided command writes `experimental.quotaToast.quotaProviders` in the global OpenCode config. Set up the normal OpenCode `provider` block yourself:
 
 ```jsonc
 {
@@ -126,13 +165,7 @@ The command writes the `experimental.quotaToast.quotaProviders` section. Configu
           "mode": "local-estimate",
           "modelIds": ["model-a"],
           "windows": [
-            {
-              "id": "daily",
-              "label": "Daily",
-              "type": "utc-day",
-              "requestLimit": 1000,
-              "usdBudget": 25,
-            },
+            { "id": "daily", "label": "Daily", "type": "utc-day", "requestLimit": 1000, "usdBudget": 25 },
           ],
         },
       ],
@@ -140,9 +173,7 @@ The command writes the `experimental.quotaToast.quotaProviders` section. Configu
   },
   "provider": {
     "private-gateway": {
-      "models": {
-        "model-a": {},
-      },
+      "models": { "model-a": {} },
     },
   },
 }
@@ -150,229 +181,101 @@ The command writes the `experimental.quotaToast.quotaProviders` section. Configu
 
 </details>
 
-<details>
-<summary><strong>Custom-provider rules</strong></summary>
-
-- `quotaProviders` is global-only and keeps file order.
-- `id` is the stable identity. Add `providerId` only when it differs.
-- `modelIds` affects only `onlyCurrentModel`. Use exact, case-sensitive model IDs without the outer provider prefix, or omit it to cover every model for that provider.
-- Remote APIs use a fixed authenticated `GET`. Supported formats are `quota-v1`, `json-v1`, and `openrouter-key-v1`.
-- `json-v1` requires an `adapter` with 1–16 mappings. Paths are literal own-property segment arrays, not JSONPath.
-- Local estimates support 1–16 UTC-day or rolling request windows.
-- Automatic models.dev matching runs first. `pricingModelMap` cannot override a successful automatic match.
-- If any request cannot be priced, request counts stay visible and the budget percentage is reported unavailable.
-- Credentials resolve from `apiKeyEnv`, trusted global `provider.<providerId>.options.apiKey`, then API-key entries in OpenCode `auth.json`.
-- Definitions run automatically with `enabledProviders: "auto"`. A manual list must include `quota-providers` and every built-in provider you still want.
-- To tune maintained estimates, use the reserved `qwen-code` or `alibaba-coding-plan` ID and its maintained window shape. Do not add a duplicate normal provider block.
-- Project secrets, scripts, custom headers, executable mappings, regular expressions, and JSONPath are not accepted.
-
-Run `/quota_status` to see the exact state path and safe authentication source without exposing secrets.
-
-</details>
-
-See [Providers](providers.md#custom-providers) for response formats and setup details.
-
-## More recipes
-
-<details>
-<summary><strong>Choose providers yourself</strong></summary>
-
-```jsonc
-{
-  "enabledProviders": ["copilot", "openai", "google-agy"],
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Show used percentages</strong></summary>
-
-```jsonc
-{
-  "percentDisplayMode": "used",
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Keep compact status on Home only</strong></summary>
-
-```jsonc
-{
-  "tuiCompactStatus": {
-    "enabled": true,
-    "homeBottom": true,
-    "sessionPrompt": false,
-  },
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Show finer-grained reset countdowns</strong></summary>
-
-By default, toast, Sidebar, and terminal `show` countdowns keep the compact display (`6d`, `2h`, `0.5h`). Set `resetTimeDecimals` to an integer from `0` to `4` to show fractional durations such as `5.7d` or `1.4h`.
-
-```jsonc
-{
-  "resetTimeDecimals": 1,
-}
-```
-
-Leave it unset to preserve the default display exactly.
-
-</details>
-
-<details>
-<summary><strong>Change maintainer notices</strong></summary>
-
-```jsonc
-{
-  "maintainerAnnouncements": {
-    "enabled": true,
-    "home": true,
-  },
-}
-```
-
-Set `enabled` to `false` to turn automatic notices off.
-
-</details>
-
-<details>
-<summary><strong>Allow more time for provider requests</strong></summary>
-
-```jsonc
-{
-  "requestTimeoutMs": 12000,
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Write quota JSON for another tool</strong></summary>
-
-```jsonc
-{
-  "export": {
-    "enabled": true,
-  },
-}
-```
-
-See [External integration](external-integration.md).
-
-</details>
-
-<details>
-<summary><strong>Advanced: also write the older OpenCode settings block</strong></summary>
-
-```bash
-npx @slkiser/opencode-quota init --sync-legacy-config
-```
-
-Use this only if another tool needs `experimental.quotaToast` mirrored into `opencode.jsonc` or `.json`.
-
-</details>
-
 ## Full configuration reference
 
-Most settings go in the same `opencode-quota/quota-toast.jsonc` or `.json` sidecar described above. The guided editor maintains `quotaProviders` in that authoritative sidecar when one exists; otherwise it uses the global OpenCode `experimental.quotaToast` section; do not duplicate it in a second file.
+Most settings go in the `opencode-quota/quota-toast.jsonc` or `.json` file described above. The guided editor keeps `quotaProviders` in that file when it exists; otherwise it uses the global OpenCode JSONC/JSON `experimental.quotaToast` section; do not duplicate it in a second file. Existing `experimental.quotaToast` settings still work. To also mirror settings into `experimental.quotaToast` for another tool, run `npx @slkiser/opencode-quota init --sync-legacy-config`.
 
-Existing `experimental.quotaToast` settings remain supported. Quota settings do not live in `tui.json`.
+Provider credentials (API keys, cookies, tokens) are never set here. See [API keys](providers.md#api-keys) and each provider's [setup notes](providers.md#provider-setup-notes).
 
 <details>
 <summary><strong>All settings</strong></summary>
 
-### Core/shared settings
+### Core settings
 
-| Option                        | Default        | Meaning                                                                                                                                                                                                                                                                                                             |
-| ----------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`                     | `true`         | Master switch for quota collection and handled slash commands. When `false`, `/quota`, `/quota_status`, `/pricing_refresh`, and `/tokens_*` are handled as no-ops.                                                                                                                                                  |
-| `enabledProviders`            | `"auto"`       | Auto-detect providers, or set an explicit provider list. Use the aggregate ID `quota-providers` for configured definitions.                                                                                                                                                                                         |
-| `quotaProviders`              | `[]`           | Ordered global-only `remote-api` or `local-estimate` definitions maintained in global OpenCode JSONC/JSON. Each item has a stable `id`; `providerId` is only needed when different.                                                                                                                                 |
-| `minIntervalMs`               | `300000`       | Minimum fetch interval between provider updates.                                                                                                                                                                                                                                                                    |
-| `requestTimeoutMs`            | `5000`         | Remote provider request timeout in milliseconds.                                                                                                                                                                                                                                                                    |
-| `formatStyle`                 | `singleWindow` | Shared quota reset-period display for TUI popup toasts, the Sidebar panel, and Compact status line unless a TUI surface override is set: `singleWindow` shows one reset period per provider; `allWindows` shows all reset periods per provider. Legacy `classic`/`grouped` aliases are still accepted.              |
-| `percentDisplayMode`          | `remaining`    | Shared quota percentage meaning for TUI popup toasts, the Sidebar panel, and `/quota`: `remaining` shows quota left; `used` shows quota consumed.                                                                                                                                                                   |
-| `resetTimeDecimals`           | unset          | Decimal places for compact reset countdowns in popup toasts, the Sidebar panel, and terminal `show`. Accepts integers `0`–`4`; unset preserves the default integer-day and half-hour-step display.                                                                                                                  |
-| `onlyCurrentModel`            | `false`        | Filter quota rows to the current model/provider when that session selection can be resolved.                                                                                                                                                                                                                        |
-| `showSessionTokens`           | `true`         | Show the `Session input/output tokens` section when session token data is available. When cached input is present, the section keeps the legacy `in/out` layout and appends cached input in parentheses next to the input amount.                                                                                   |
-| `sessionTokenScope`           | `"current"`    | Choose `current` for the active session only or `tree` for the active session plus recursive descendants/subagents, counted once. Applies to `/quota`, popup toasts, the Sidebar panel, and the compact input line when `showSessionTokens` is enabled. Does not change `/tokens_session` or `/tokens_session_all`. |
-| `pricingSnapshot.source`      | `"auto"`       | Token pricing snapshot selection for `/tokens_*`: `auto`, `bundled`, or `runtime`.                                                                                                                                                                                                                                  |
-| `pricingSnapshot.autoRefresh` | `7`            | Refresh stale local pricing data after this many days.                                                                                                                                                                                                                                                              |
+| Option                        | Default        | Meaning |
+| ----------------------------- | -------------- | ------- |
+| `enabled`                     | `true`         | Master switch. When `false`, `/quota`, `/quota_status`, `/pricing_refresh`, and `/tokens_*` do nothing. |
+| `enabledProviders`            | `"auto"`       | Auto-detect providers, or list them. Use `quota-providers` for custom definitions. |
+| `quotaProviders`              | `[]`           | Custom provider definitions (global-only). See [Custom providers](#custom-providers). |
+| `minIntervalMs`               | `300000`       | Minimum time between provider updates. |
+| `requestTimeoutMs`            | `5000`         | Provider request timeout in milliseconds. |
+| `formatStyle`                 | `singleWindow` | `singleWindow` shows one reset period per provider; `allWindows` shows all. Used by toasts, the sidebar, and the compact line unless they override it. Old `classic`/`grouped` names still work. |
+| `percentDisplayMode`          | `remaining`    | `remaining` shows what is left; `used` shows what is used. |
+| `quotaProjection`             | unset          | `"runway"` adds a **Runs out** estimate. See [above](#estimate-when-fixed-quota-runs-out). |
+| `percentLabelStyle`           | unset          | `bare` drops `left`/`used` from labels. `full` is also accepted. |
+| `accountingDetail`            | `summary`      | `summary` or `detailed`. See [above](#show-accounting-detail). |
+| `resetTimeDecimals`           | unset          | `0`–`4`: show the largest countdown unit as a decimal. |
+| `resetTimeSpaced`             | `true`         | `false` writes countdowns without spaces (`2d5h14m`). |
+| `onlyCurrentModel`            | `false`        | Show only the current model's provider, when it can be found. |
+| `waitForQuotaReset`           | `true`         | On by default. When a request hits a provider limit, the plugin asks that model's provider for fresh quota; if a window shows 0% left, OpenCode retries 1 minute after the earliest such window resets (at most 5 hours per wait) instead of retrying quickly or giving up. Interrupt the session to stop waiting (Esc twice in the TUI). Set `"waitForQuotaReset": false` to keep OpenCode's normal retry timing. |
+| `showSessionTokens`           | `true`         | Show `Session input/output tokens` when available. Cached input appears in parentheses next to input. |
+| `sessionTokenScope`           | `"current"`    | `current` or `tree` (adds subagent sessions). See [above](#include-subagent-session-tokens). |
+| `resetNotifications.enabled`  | `false`        | Popup when a watched window resets. Needs popup toasts. |
+| `resetNotifications.windows`  | `["weekly"]`   | `fiveHour`, `hourly`, `daily`, `weekly`, `monthly`, or `yearly`. |
+| `pricingSnapshot.source`      | `"auto"`       | Token pricing for `/tokens_*`: `auto`, `bundled`, or `runtime`. |
+| `pricingSnapshot.autoRefresh` | `7`            | Refresh local pricing after this many days. |
 
 ### TUI toast settings
 
-| Option            | Default | Meaning                                                                                                                                                     |
-| ----------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enableToast`     | `true`  | Show TUI popup toasts. OpenCode 1.17.20 Web does not surface these events. Disabling this does not disable terminal checks, other UI surfaces, or `/quota`. |
-| `toastDurationMs` | `9000`  | Toast duration in milliseconds.                                                                                                                             |
-| `showOnIdle`      | `true`  | Show a toast on the idle trigger.                                                                                                                           |
-| `showOnQuestion`  | `true`  | Show a toast after a question/assistant response.                                                                                                           |
-| `showOnCompact`   | `true`  | Show a toast after session compaction.                                                                                                                      |
-| `showOnBothFail`  | `true`  | Show a fallback toast when providers attempted quota reads and all failed.                                                                                  |
-| `layout.maxWidth` | `50`    | Toast formatting width target.                                                                                                                              |
-| `layout.narrowAt` | `42`    | Toast compact-layout breakpoint.                                                                                                                            |
-| `layout.tinyAt`   | `32`    | Toast tiny-layout breakpoint.                                                                                                                               |
-| `debug`           | `false` | Append toast debug context when troubleshooting.                                                                                                            |
+Toasts appear only in the TUI, never in Web or Desktop.
+
+| Option            | Default | Meaning |
+| ----------------- | ------- | ------- |
+| `enableToast`     | `true`  | Show popup toasts. Turning it off does not affect `/quota` or other displays. |
+| `toastDurationMs` | `9000`  | How long a toast stays, in milliseconds. |
+| `showOnIdle`      | `true`  | Show a toast after each finished reply. |
+| `showOnQuestion`  | `true`  | Show a toast after the assistant's `question` tool finishes. |
+| `showOnCompact`   | `true`  | Show a toast after session compaction. |
+| `showOnBothFail`  | `true`  | Show a toast when every provider failed. |
+| `layout.maxWidth` | `50`    | Toast width target. |
+| `layout.narrowAt` | `42`    | Width where the toast switches to its narrow layout. |
+| `layout.tinyAt`   | `32`    | Width where the toast switches to its tiny layout. |
+| `debug`           | `false` | Add debug details to toasts. |
 
 ### TUI settings
 
-| Option                                             | Default              | Meaning                                                                                                                                                                                                       |
-| -------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tuiCommandDisplay`                                | `"inline"`           | Choose where deterministic native TUI command output appears. `inline` adds an ignored/no-reply plain-text message to the active transcript and uses a dialog on Home; `dialog` always opens the local popup. |
-| `tuiSidebarPanel.enabled`                          | `true`               | Show the Sidebar `Quota` panel when the TUI plugin is installed. Click the panel header to toggle between compact summary and detailed all-windows views; OpenCode remembers the last state.                  |
-| `tuiSidebarPanel.formatStyle`                      | (root `formatStyle`) | Override `formatStyle` for the Sidebar panel only. Useful when you want `allWindows` detail in the sidebar but a different style elsewhere.                                                                   |
-| `tuiCompactStatus.enabled`                         | `false`              | Opt in to Compact status line UI surfaces.                                                                                                                                                                    |
-| `tuiCompactStatus.homeBottom`                      | `true`               | Show the Compact status line at the home bottom location.                                                                                                                                                     |
-| `tuiCompactStatus.sessionPrompt`                   | `true`               | Show the Compact status line by wrapping the TUI session prompt. Disable this if you only want the home-bottom line.                                                                                          |
-| `tuiCompactStatus.suppressWhenNativeProviderQuota` | `true`               | Hide the Compact status line when OpenCode exposes native provider-quota support.                                                                                                                             |
-| `tuiCompactStatus.maxWidth`                        | `96`                 | Maximum Compact status line text width.                                                                                                                                                                       |
-| `tuiCompactStatus.formatStyle`                     | (root `formatStyle`) | Override `formatStyle` for the Compact status line only. Useful when you want `singleWindow` on the compact line while the sidebar shows `allWindows`.                                                        |
+| Option                                      | Default              | Meaning |
+| ------------------------------------------- | -------------------- | ------- |
+| `tuiCommandDisplay`                         | `"dialog"`           | Where TUI slash reports appear: `dialog` (popup, no chat message) or `inline` (in the chat). Web and Desktop always use the chat. If a session is open in the TUI and in Web, `dialog` also removes a Web `/quota` report from the chat while the TUI shows that session. |
+| `tuiSidebarPanel.enabled`                   | `true`               | Show the sidebar `Quota` panel. Click its header to collapse or expand; OpenCode remembers the choice. |
+| `tuiSidebarPanel.formatStyle`               | (root `formatStyle`) | Sidebar-only `formatStyle`. |
+| `tuiSidebarPanel.opencodeGoPreferredWindow` | unset                | `rolling`, `weekly`, or `monthly`: OpenCode Go's row while the sidebar is collapsed. Unset or unavailable uses the lowest remaining window. |
+| `tuiCompactStatus.enabled`                  | `false`              | Show the compact status line. |
+| `tuiCompactStatus.homeBottom`               | `true`               | Show it at the bottom of Home. |
+| `tuiCompactStatus.sessionPrompt`            | `true`               | Show it below the session prompt. |
+| `tuiCompactStatus.maxWidth`                 | `96`                 | Maximum line width. |
+| `tuiCompactStatus.formatStyle`              | (root `formatStyle`) | Compact-line-only `formatStyle`. |
+| `tuiPromptBar.enabled`                      | `false`              | Show one main quota row as a bar below the prompt, replacing the compact line there. Labels look like `OpenAI 5h`; the bar is a fixed 12 cells, and long labels end in an ellipsis. |
 
-### Maintainer announcement settings
+### Maintainer notices
 
-| Option                            | Default | Meaning                                                                                                                                                     |
-| --------------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `maintainerAnnouncements.enabled` | `true`  | Enable bundled maintainer announcements.                                                                                                                    |
-| `maintainerAnnouncements.home`    | `true`  | Show the count-only notice on TUI home when the quota TUI plugin is configured, or as a one-shot toast fallback after a visible quota toast when it is not. |
+| Option                                  | Default   | Meaning |
+| --------------------------------------- | --------- | ------- |
+| `maintainerAnnouncements.enabled`       | `true`    | Show bundled maintainer notices. |
+| `maintainerAnnouncements.home`          | `true`    | Show the count of active notices at the bottom of Home. |
+| `maintainerAnnouncements.homeFrequency` | `"daily"` | `"daily"`: show that Home line on the first Home screen of each day, for 10 minutes. `"always"`: show it on every Home screen. `/quota_announcements` always lists the notices. |
 
-### Provider-specific settings
+### Provider settings
 
-| Option                       | Default                            | Meaning                                                                                              |
-| ---------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `anthropicBinaryPath`        | `"claude"`                         | Command/path used for local Claude CLI probing.                                                      |
-| `googleModels`               | `["CLAUDE"]`                       | Google model keys to query: `CLAUDE`, `G3PRO`, `G3FLASH`, `G3IMAGE`, `GPTOSS`.                       |
-| `opencodeGoWindows`          | `["rolling", "weekly", "monthly"]` | OpenCode Go usage windows to display.                                                                |
-| `opencodeMonthlyLimit`       | unset                              | Override the OpenCode Zen monthly budget in USD.                                                     |
-| `cursorPlan`                 | `"none"`                           | Cursor included API budget preset: `none`, `pro`, `pro-plus`, `ultra`.                               |
-| `cursorIncludedApiUsd`       | unset                              | Override Cursor monthly included API budget in USD.                                                  |
-| `cursorBillingCycleStartDay` | unset                              | Local billing-cycle anchor day `1..28`; when unset, Cursor usage resets on the local calendar month. |
+| Option                       | Default                            | Meaning |
+| ---------------------------- | ---------------------------------- | ------- |
+| `anthropicBinaryPath`        | `"claude"`                         | Claude CLI command or path. With `"claude"`, OpenCode's `PATH` is tried first, then the usual install folders (not on Windows). |
+| `opencodeGoWindows`          | `["rolling", "weekly", "monthly"]` | Which OpenCode Go windows appear: Five-hour, Weekly, and Monthly. |
+| `opencodeMonthlyLimit`       | unset                              | Override the OpenCode Zen monthly budget in USD. |
+| `cursorPlan`                 | `"none"`                           | Cursor included API budget: `none`, `pro`, `pro-plus`, or `ultra`. |
+| `cursorIncludedApiUsd`       | unset                              | Override Cursor's monthly included API budget in USD. |
+| `cursorBillingCycleStartDay` | unset                              | Billing day `1`–`28`. Unset uses the local calendar month. |
 
-Kilo Gateway has no `quota-toast.json` credential setting. Use `KILO_API_KEY`, trusted user/global `provider.kilo.options.apiKey`, or a strict `kilo` API-key entry in OpenCode `auth.json`; project-local OpenCode config is not read for this secret. See [Kilo Gateway setup](providers.md#kilo-gateway).
+The old `opencodeZenDisplay` setting is gone. If it is still in your config, it is ignored and `/quota_status` reports it; `update` can migrate it. See [What can change automatically](updating.md#what-can-change-automatically).
 
-Ollama Cloud has no `quota-toast.json` credential setting. Use `OLLAMA_API_KEY`, trusted user/global `provider.ollama-cloud.options.apiKey`, or a strict `ollama-cloud` API-key entry in OpenCode `auth.json`; project-local OpenCode config is not read for this secret. See [Ollama Cloud setup](providers.md#ollama-cloud).
+### Export and telemetry settings
 
-Xiaomi MiMo has no `quota-toast.json` credential or endpoint setting. Use `MIMO_USAGE_COOKIE` or trusted user/global `opencode-quota/mimo.json`; see [Xiaomi MiMo setup](providers.md#xiaomi-mimo).
+| Option              | Default | Meaning |
+| ------------------- | ------- | ------- |
+| `export.enabled`    | `false` | Write a JSON file each time the TUI Home quota footer refreshes. |
+| `export.path`       | `""`    | Empty uses `$XDG_CACHE_HOME/opencode/quota-export.json`. Supports `~/`. A relative path is relative to your home folder, where OpenCode's service runs. |
+| `telemetry.enabled` | `false` | Publish quota and cache-age gauges through OpenCode's global OpenTelemetry `MeterProvider`. No extra provider calls. |
 
-### Export settings
-
-| Option           | Default | Meaning                                                                                                                     |
-| ---------------- | ------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `export.enabled` | `false` | Write a JSON export file after each TUI background refresh.                                                                 |
-| `export.path`    | `""`    | Export file path. Empty string uses the XDG default: `$XDG_CACHE_HOME/opencode/quota-export.json`. Supports `~/` expansion. |
-
-### Telemetry settings
-
-| Option              | Default | Meaning                                                                                                                         |
-| ------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `telemetry.enabled` | `false` | Publish quota consumption and cache-age gauges through the host's global OpenTelemetry `MeterProvider`; adds no provider calls. |
-
-See [External integration](external-integration.md#3-send-opentelemetry-metrics) for metric names, attributes, setup, and privacy behavior.
+See [External integration](external-integration.md) for details.
 
 </details>

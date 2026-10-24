@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
+import { formatLocalCallTimestamp } from "../src/lib/format-utils.js";
 import { aggregateUsage } from "../src/lib/quota-stats.js";
-
 import {
   buildProviderStatusReport,
   buildQuotaStatusReportForTest,
+  DEFAULT_QUOTA_STATUS_REPORT_GENERATED_AT_MS,
   expectReportSection,
   getReportSection,
   makeProviderAvailability,
@@ -12,6 +12,7 @@ import {
   makeProviderProbe,
   makeProviderSafeFailureProbe,
   makeProviderSuccessProbe,
+  makeQuotaStatusReportParams,
   makeStatusDetails,
 } from "./helpers/quota-status-test-harness.js";
 
@@ -32,129 +33,6 @@ const pricingMocks = vi.hoisted(() => ({
   getPricingSnapshotSource: vi.fn(() => "bundled"),
 }));
 
-const googleMocks = vi.hoisted(() => ({
-  inspectAntigravityAccountsPresence: vi.fn(async () => ({
-    state: "missing" as const,
-    presentPaths: [],
-    candidatePaths: ["/tmp/antigravity-accounts.json"],
-    accountCount: 0,
-    validAccountCount: 0,
-  })),
-}));
-
-const googleCompanionMocks = vi.hoisted(() => ({
-  inspectAntigravityCompanionPresence: vi.fn(async () => ({
-    state: "missing" as const,
-    importSpecifier: "opencode-antigravity-auth/dist/src/constants.js",
-    error: "Install opencode-antigravity-auth separately to enable Google Antigravity quota",
-  })),
-}));
-
-const geminiCliMocks = vi.hoisted(() => ({
-  inspectGeminiCliAuthPresence: vi.fn(async () => ({
-    state: "missing" as const,
-    accountCount: 0,
-    validAccountCount: 0,
-  })),
-  inspectGeminiCliCompanionPresence: vi.fn(async () => ({
-    state: "missing" as const,
-    importSpecifier: "opencode-gemini-auth/src/constants.ts",
-    error: "Install opencode-gemini-auth separately to enable Gemini CLI quota",
-  })),
-}));
-
-const agyMocks = vi.hoisted(() => ({
-  inspectAgyAuthPresence: vi.fn(async () => ({
-    state: "missing" as const,
-    accountCount: 0,
-    validAccountCount: 0,
-  })),
-  inspectAgyCompanionPresence: vi.fn(async () => ({
-    state: "missing" as const,
-    importSpecifier: "@anthonyhaussman/opencode-agy-auth/dist/src/constants.js",
-    error: "Install @anthonyhaussman/opencode-agy-auth separately to enable Google AGY quota",
-  })),
-}));
-
-const openaiMocks = vi.hoisted(() => ({
-  resolveOpenAIOAuth: vi.fn(() => ({ state: "none" as const })),
-}));
-
-const alibabaMocks = vi.hoisted(() => ({
-  getAlibabaCodingPlanAuthDiagnostics: vi.fn(async () => ({
-    state: "none" as const,
-    source: null,
-    checkedPaths: [],
-    authPaths: ["/tmp/auth.json"],
-  })),
-  resolveAlibabaCodingPlanAuthCached: vi.fn(async () => ({ state: "none" as const })),
-}));
-
-const minimaxMocks = vi.hoisted(() => ({
-  getMiniMaxAuthDiagnostics: vi.fn(async () => ({
-    state: "none" as const,
-    source: null,
-    checkedPaths: [],
-    authPaths: ["/tmp/auth.json"],
-  })),
-  getMiniMaxChinaAuthDiagnostics: vi.fn(async () => ({
-    state: "none" as const,
-    source: null,
-    checkedPaths: [],
-    authPaths: ["/tmp/auth.json"],
-  })),
-  resolveMiniMaxAuthCached: vi.fn(async () => ({ state: "none" as const })),
-  resolveMiniMaxChinaAuthCached: vi.fn(async () => ({ state: "none" as const })),
-  queryMiniMaxQuota: vi.fn(async () => ({ success: true as const, entries: [] })),
-}));
-
-const zaiMocks = vi.hoisted(() => ({
-  getZaiAuthDiagnostics: vi.fn(async () => ({
-    state: "none" as const,
-    source: null,
-    checkedPaths: [],
-    authPaths: ["/tmp/auth.json"],
-  })),
-  queryZaiQuota: vi.fn(async () => null),
-}));
-
-const zhipuMocks = vi.hoisted(() => ({
-  getZhipuAuthDiagnostics: vi.fn(async () => ({
-    state: "none" as const,
-    source: null,
-    checkedPaths: [],
-    authPaths: ["/tmp/auth.json"],
-  })),
-  queryZhipuQuota: vi.fn(async () => null),
-}));
-
-const nanoGptMocks = vi.hoisted(() => ({
-  getNanoGptKeyDiagnostics: vi.fn(async () => ({
-    configured: false,
-    source: null,
-    checkedPaths: [],
-    authPaths: ["/tmp/auth.json"],
-  })),
-  queryNanoGptQuota: vi.fn(async () => null),
-}));
-
-const deepSeekMocks = vi.hoisted(() => ({
-  getDeepSeekKeyDiagnostics: vi.fn(async () => ({
-    configured: false,
-    source: null,
-    checkedPaths: [],
-    authPaths: ["/tmp/auth.json"],
-  })),
-}));
-
-const llmGateMocks = vi.hoisted(() => ({
-  getLlmGateAuthDiagnostics: vi.fn(async () => ({
-    configured: false,
-    accessTokenConfigured: false,
-    refreshTokenConfigured: false,
-    authPaths: ["/tmp/auth.json"],
-  })),
-}));
 const syntheticMocks = vi.hoisted(() => ({
   getSyntheticKeyDiagnostics: vi.fn(async () => ({
     configured: false,
@@ -164,13 +42,31 @@ const syntheticMocks = vi.hoisted(() => ({
   querySyntheticQuota: vi.fn(async () => null),
 }));
 
+const openrouterMocks = vi.hoisted(() => ({
+  hasOpenRouterApiKeyConfigured: vi.fn(async () => false),
+  queryOpenRouterQuota: vi.fn(async () => null),
+  resolveOpenRouterApiKey: vi.fn(async () => ({
+    source: null,
+    checkedPaths: [],
+    credentialDatabasePaths: [],
+  })),
+}));
+
 vi.mock("fs/promises", () => ({
   stat: fsPromiseMocks.stat,
 }));
 
+const credentialSourceMocks = vi.hoisted(() => ({
+  getCredentialSourceDiagnostics: vi.fn(() => ({
+    state: "bound",
+    kind: "opencode-integration-api",
+    failures: [],
+  })),
+}));
+
 vi.mock("../src/lib/opencode-auth.js", () => ({
-  getAuthPath: () => "/tmp/auth.json",
-  getAuthPaths: () => ["/tmp/auth.json"],
+  getCredentialDatabasePaths: () => ["/tmp/opencode.db"],
+  getCredentialSourceDiagnostics: credentialSourceMocks.getCredentialSourceDiagnostics,
   readAuthFileCached: vi.fn(async () => ({})),
 }));
 
@@ -181,9 +77,6 @@ vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
     cacheDir: "/tmp/cache",
     stateDir: "/tmp/state",
   }),
-  getOpencodeRuntimeDirCandidates: () => ({
-    configDirs: ["/tmp/config"],
-  }),
 }));
 
 vi.mock("../src/lib/synthetic.js", () => ({
@@ -191,42 +84,21 @@ vi.mock("../src/lib/synthetic.js", () => ({
   querySyntheticQuota: syntheticMocks.querySyntheticQuota,
 }));
 
-vi.mock("../src/lib/chutes.js", () => ({
-  getChutesKeyDiagnostics: vi.fn(async () => ({
-    configured: false,
-    source: null,
-    checkedPaths: [],
-  })),
+vi.mock("../src/lib/openrouter.js", () => ({
+  hasOpenRouterApiKeyConfigured: openrouterMocks.hasOpenRouterApiKeyConfigured,
+  queryOpenRouterQuota: openrouterMocks.queryOpenRouterQuota,
+  resolveOpenRouterApiKey: openrouterMocks.resolveOpenRouterApiKey,
 }));
 
-vi.mock("../src/lib/nanogpt.js", () => ({
-  getNanoGptKeyDiagnostics: nanoGptMocks.getNanoGptKeyDiagnostics,
-  queryNanoGptQuota: nanoGptMocks.queryNanoGptQuota,
-}));
-
-vi.mock("../src/lib/deepseek.js", () => ({
-  getDeepSeekKeyDiagnostics: deepSeekMocks.getDeepSeekKeyDiagnostics,
-}));
-
-vi.mock("../src/lib/llmgate.js", () => ({
-  getLlmGateAuthDiagnostics: llmGateMocks.getLlmGateAuthDiagnostics,
-}));
-vi.mock("../src/lib/qwen-local-quota.js", () => ({
-  QWEN_LOCAL_QUOTA_STATE_VERSION: 1,
+vi.mock("../src/lib/alibaba-coding-plan-local-quota.js", () => ({
   ALIBABA_CODING_PLAN_STATE_VERSION: 1,
-  computeQwenQuota: () => ({
-    day: { used: 0, limit: 1000 },
-    rpm: { used: 0, limit: 60 },
-  }),
   computeAlibabaCodingPlanQuota: () => ({
     tier: "lite",
     fiveHour: { used: 0, limit: 1200 },
     weekly: { used: 0, limit: 9000 },
     monthly: { used: 0, limit: 18000 },
   }),
-  getQwenLocalQuotaPath: () => "/tmp/qwen-state.json",
   getAlibabaCodingPlanQuotaPath: () => "/tmp/alibaba-state.json",
-  readQwenLocalQuotaState: vi.fn(async () => ({})),
   readAlibabaCodingPlanQuotaState: vi.fn(async () => ({})),
 }));
 
@@ -260,7 +132,7 @@ vi.mock("../src/providers/registry.js", () => ({
     { id: "synthetic" },
     { id: "nanogpt" },
     { id: "deepseek" },
-    { id: "llmgate" },
+    { id: "opencode-go" },
     { id: "xiaomi" },
     { id: "kimi-for-coding" },
     { id: "kimi-code" },
@@ -271,9 +143,11 @@ vi.mock("../src/lib/version.js", () => ({
   getPackageVersion: vi.fn(async () => "1.2.3"),
 }));
 
-vi.mock("../src/lib/opencode-storage.js", () => ({
+vi.mock("../src/lib/opencode-db-path.js", () => ({
   getOpenCodeDbPath: () => "/tmp/opencode.db",
-  getOpenCodeDbPathCandidates: () => ["/tmp/opencode.db"],
+}));
+
+vi.mock("../src/lib/opencode-storage.js", () => ({
   getOpenCodeDbStats: vi.fn(async () => ({
     sessionCount: 0,
     messageCount: 0,
@@ -297,6 +171,87 @@ vi.mock("../src/lib/quota-stats.js", () => ({
 describe("buildQuotaStatusReport", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("keeps the title line in text and gives the dialog the version and time", async () => {
+    const { buildQuotaStatusReportDocument } = await import("../src/lib/quota-status.js");
+    const time = formatLocalCallTimestamp(DEFAULT_QUOTA_STATUS_REPORT_GENERATED_AT_MS);
+
+    const report = await buildQuotaStatusReportForTest();
+    const document = await buildQuotaStatusReportDocument(makeQuotaStatusReportParams());
+
+    expect(report.split("\n").slice(0, 2)).toEqual([
+      `# Quota Status (opencode-quota v1.2.3) (/quota_status) ${time}`,
+      "",
+    ]);
+    expect(document.heading).toEqual({
+      line: `# Quota Status (opencode-quota v1.2.3) (/quota_status) ${time}`,
+      subtitle: `opencode-quota v1.2.3 · ${time}`,
+    });
+  });
+
+  it("shows the home dir as ~ in every report path, but not in lookalike or outside paths", async () => {
+    const { buildQuotaStatusReportDocument } = await import("../src/lib/quota-status.js");
+    const params = makeQuotaStatusReportParams({
+      homeDir: "/tmp",
+      configPaths: ["/tmp/config/opencode.json", "/tmpfoo/opencode.json", "/var/opencode.json"],
+      runtimeRoots: { workspaceRoot: "/tmp/project", configRoot: "/tmp" },
+    });
+
+    const report = await buildQuotaStatusReportForTest(params);
+    const document = await buildQuotaStatusReportDocument(params);
+
+    expect(report).toContain(
+      "- configPaths: ~/config/opencode.json | /tmpfoo/opencode.json | /var/opencode.json",
+    );
+    expect(report).toContain("- workspace_root: ~/project");
+    expect(report).toContain("- config_root: ~\n");
+    expect(report).toContain("data=~/data config=~/config cache=~/cache state=~/state");
+    expect(report).toContain("path=~/opencode.db present=false");
+    expect(report).toContain(
+      "snapshot=~/pricing-snapshot.json refresh_state=~/pricing-refresh-state.json",
+    );
+    expect(report).not.toMatch(/(^|[\s=|(])\/tmp([/\s]|$)/mu);
+    expect(JSON.stringify(document)).not.toMatch(/[\s=|("]\/tmp[/\s"]/u);
+  });
+
+  it("shows a JSON-quoted Windows command under a home with a space as ~", async () => {
+    const quotedCommand = `${JSON.stringify("C:\\Users\\Alice Smith\\.local\\bin\\claude")} --version`;
+    const report = await buildProviderStatusReport("anthropic", {
+      homeDir: "C:\\Users\\Alice Smith",
+      providerLiveProbes: [
+        makeProviderSuccessProbe("anthropic", {
+          checked_commands: `claude --version | ${quotedCommand}`,
+        }),
+      ],
+    });
+
+    expect(getReportSection(report, "anthropic:")).toContain(
+      '- checked_commands: claude --version | "~\\\\.local\\\\bin\\\\claude" --version',
+    );
+    expect(report).not.toContain("Alice");
+  });
+
+  it("shows the home dir as ~ before cutting a long live row", async () => {
+    const report = await buildProviderStatusReport("openrouter", {
+      homeDir: "/Users/alice",
+      providerLiveProbes: [
+        makeProviderSuccessProbe(
+          "openrouter",
+          {},
+          {
+            errors: [
+              { label: "OpenRouter", message: `${"x".repeat(109)} /Users/alice/token.json` },
+            ],
+          },
+        ),
+      ],
+    });
+
+    expect(getReportSection(report, "openrouter:")).toContain(
+      `- live_error_1: ${"x".repeat(109)} ~/token.js\n`,
+    );
+    expect(report).not.toContain("/Users/ali");
   });
 
   it("uses a Unicode ellipsis for truncated pricing diagnostic lists", async () => {
@@ -360,56 +315,6 @@ describe("buildQuotaStatusReport", () => {
     );
   });
 
-  it("reports effective googleModels and whether they came from defaults or a config file", async () => {
-    const defaultsReport = await buildQuotaStatusReportForTest({
-      configSource: "defaults",
-      googleModels: ["CLAUDE"],
-    });
-    expect(defaultsReport).toContain("- googleModels: CLAUDE");
-    expect(defaultsReport).toContain("- googleModels_source: default");
-
-    const configPath =
-      "/tmp/config/opencode-quota/quota-toast.json (opencode-quota/quota-toast.json)";
-    const configuredReport = await buildQuotaStatusReportForTest({
-      configSource: "files",
-      googleModels: ["CLAUDE", "G3PRO"],
-      settingSources: { googleModels: configPath },
-    });
-    expect(configuredReport).toContain("- googleModels: CLAUDE,G3PRO");
-    expect(configuredReport).toContain(`- googleModels_source: configuration file (${configPath})`);
-  });
-
-  it("keeps the raw Antigravity family in live quota diagnostics", async () => {
-    const report = await buildProviderStatusReport("google-antigravity", {
-      providerLiveProbes: [
-        makeProviderSuccessProbe(
-          "google-antigravity",
-          {},
-          {
-            entries: [
-              {
-                accounting: QUOTA_ACCOUNTING,
-                name: "Antigravity (ali…): Claude",
-                group: "[Antigravity (ali…)]",
-                label: "Claude:",
-                metricLabel: "Claude",
-                percentRemaining: 64,
-              },
-            ],
-            presentation: {
-              classicStrategy: "preserve",
-              redundantQuotaFamily: "Claude",
-            },
-          },
-        ),
-      ],
-    });
-
-    const section = getReportSection(report, "google_antigravity:");
-    expect(section).toContain("- live_entry_1: Claude: percent_remaining=64");
-    expect(section).not.toContain("- live_entry_1: Quota:");
-  });
-
   it("renders only safe quota-provider identity and diagnostic fields", async () => {
     const report = await buildQuotaStatusReportForTest({
       enabledProviders: ["quota-providers"],
@@ -464,7 +369,7 @@ describe("buildQuotaStatusReport", () => {
                 httpStatus: 401,
                 entryCount: 0,
                 checkedPaths: ["env:INTERNAL_GATEWAY_KEY", "/trusted/opencode.jsonc"],
-                authPaths: ["/trusted/auth.json"],
+                credentialDatabasePaths: ["/trusted/opencode.db"],
               },
             ],
           },
@@ -481,7 +386,7 @@ describe("buildQuotaStatusReport", () => {
     expect(section).toContain("outcome=http_error");
     expect(section).toContain("credential_category=trusted_global_config");
     expect(section).toContain("env_name=INTERNAL_GATEWAY_KEY");
-    expect(section).toContain("/trusted/opencode.jsonc | /trusted/auth.json");
+    expect(section).toContain("/trusted/opencode.jsonc | /trusted/opencode.db");
     expect(section).toContain("provider_second-source:");
     expect(section).toContain("outcome=unavailable");
     expect(section).not.toContain("private.example");
@@ -491,19 +396,10 @@ describe("buildQuotaStatusReport", () => {
     expect(section).not.toContain("401");
   });
 
-  it("uses maintained Qwen and Alibaba probes and state paths for tuning diagnostics", async () => {
+  it("uses maintained Alibaba probes and state paths for tuning diagnostics", async () => {
     const report = await buildQuotaStatusReportForTest({
-      enabledProviders: ["qwen-code", "alibaba-coding-plan"],
+      enabledProviders: ["alibaba-coding-plan"],
       quotaProviders: [
-        {
-          id: "qwen-code",
-          providerId: "qwen-code",
-          mode: "local-estimate",
-          windows: [
-            { id: "daily", type: "utc-day", requestLimit: 900 },
-            { id: "rpm", type: "rolling", durationMinutes: 1, requestLimit: 50 },
-          ],
-        },
         {
           id: "alibaba-coding-plan",
           providerId: "alibaba-coding-plan",
@@ -516,27 +412,6 @@ describe("buildQuotaStatusReport", () => {
         },
       ],
       providerLiveProbes: [
-        {
-          providerId: "qwen-code",
-          result: {
-            attempted: true,
-            entries: [
-              {
-                accounting: QUOTA_ACCOUNTING,
-                name: "Qwen Free Daily",
-                percentRemaining: 90,
-              },
-            ],
-            errors: [{ label: "Qwen", message: "one local row failed" }],
-            statusDetails: makeStatusDetails({
-              local_state_path: "/tmp/qwen-state.json",
-              local_state_exists: "true",
-              local_state_health: "valid",
-              local_state_version: "1",
-              local_state_last_update: "2026-03-12T12:00:00.000Z",
-            }),
-          },
-        },
         {
           providerId: "alibaba-coding-plan",
           result: {
@@ -563,16 +438,10 @@ describe("buildQuotaStatusReport", () => {
 
     const section = getReportSection(report, "quota_providers:");
     expect(section).toContain(
-      "provider_qwen-code: provider_id=qwen-code mode=local-estimate coverage=all_models outcome=partial",
-    );
-    expect(section).toContain("limits=daily:900,rpm:50");
-    expect(section).toContain("state_path=/tmp/qwen-state.json");
-    expect(section).toContain(
       "provider_alibaba-coding-plan: provider_id=alibaba-coding-plan mode=local-estimate coverage=all_models outcome=success",
     );
     expect(section).toContain("limits=five-hour:1000,weekly:8000,monthly:16000");
     expect(section).toContain("state_path=/tmp/alibaba-state.json");
-    expect(section).not.toContain("quota-providers/qwen-code.json");
     expect(section).not.toContain("quota-providers/alibaba-coding-plan.json");
   });
 
@@ -609,6 +478,7 @@ describe("buildQuotaStatusReport", () => {
         config: {
           enabled: true,
           home: true,
+          homeFrequency: "daily",
         },
         summary: {
           source: "bundled_only",
@@ -629,6 +499,7 @@ describe("buildQuotaStatusReport", () => {
       [
         "- enabled: true",
         "- home: true",
+        "- home_frequency: daily",
         "- source: bundled_only",
         "- network: false",
         "- active: 2",
@@ -661,20 +532,9 @@ describe("buildQuotaStatusReport", () => {
         showOnBothFail: "/tmp/config/opencode.json (experimental.quotaToast)",
         "layout.maxWidth": "/tmp/project/opencode.jsonc (experimental.quotaToast)",
       },
-      tuiDiagnostics: {
+      runtimeRoots: {
         workspaceRoot: "/tmp/workspace",
         configRoot: "/tmp/project",
-        configured: true,
-        inferredSelectedPath: "/tmp/project/tui.jsonc",
-        presentPaths: ["/tmp/config/tui.json", "/tmp/project/tui.jsonc"],
-        candidatePaths: [
-          "/tmp/config/tui.json",
-          "/tmp/config/tui.jsonc",
-          "/tmp/project/tui.json",
-          "/tmp/project/tui.jsonc",
-        ],
-        quotaPluginConfigured: true,
-        quotaPluginConfigPaths: ["/tmp/project/tui.jsonc"],
       },
       enabledProviders: ["copilot"],
       anthropicBinaryPath: "/opt/claude/bin/claude",
@@ -720,21 +580,11 @@ describe("buildQuotaStatusReport", () => {
     expect(report).toContain(
       "- setting_sources: enabled<=/tmp/config/opencode.json (experimental.quotaToast) | enableToast<=/tmp/config/opencode.json (experimental.quotaToast) | minIntervalMs<=/tmp/project/opencode.jsonc (experimental.quotaToast) | enabledProviders<=/tmp/project/opencode.jsonc (experimental.quotaToast) | pricingSnapshot.source<=/tmp/config/opencode.json (experimental.quotaToast) | pricingSnapshot.autoRefresh<=/tmp/project/opencode.jsonc (experimental.quotaToast) | showOnIdle<=/tmp/config/opencode.json (experimental.quotaToast) | showOnQuestion<=/tmp/project/opencode.jsonc (experimental.quotaToast) | showOnCompact<=/tmp/project/opencode.jsonc (experimental.quotaToast) | showOnBothFail<=/tmp/config/opencode.json (experimental.quotaToast) | layout.maxWidth<=/tmp/project/opencode.jsonc (experimental.quotaToast)",
     );
-    expect(report).toContain("tui:");
+    expect(report).not.toContain("tui:");
     expect(report).toContain("- workspace_root: /tmp/workspace");
     expect(report).toContain("- config_root: /tmp/project");
-    expect(report).toContain("- config_configured: true");
-    expect(report).toContain("- inferred_selected_config_path: /tmp/project/tui.jsonc");
     expect(report).toContain(
-      "- present_config_paths: /tmp/config/tui.json | /tmp/project/tui.jsonc",
-    );
-    expect(report).toContain(
-      "- candidate_config_paths: /tmp/config/tui.json | /tmp/config/tui.jsonc | /tmp/project/tui.json | /tmp/project/tui.jsonc",
-    );
-    expect(report).toContain("- quota_plugin_configured: true");
-    expect(report).toContain("- quota_plugin_paths: /tmp/project/tui.jsonc");
-    expect(report).toContain(
-      "- auth.json: preferred=/tmp/auth.json present=(none) candidates=/tmp/auth.json",
+      "- opencode.db: path=/tmp/opencode.db present=false (session and token history)",
     );
     expect(report).toContain(
       "- pricing: source=test active_source=bundled generated_at=2026-01-01T00:00:00.000Z units=usd_per_1m_tokens",
@@ -858,15 +708,45 @@ describe("buildQuotaStatusReport", () => {
     expect(report).toContain("- live_probe: no_data");
   });
 
+  it("renders Synthetic empty-object success as a live error without quota rows or auth inference", async () => {
+    const report = await buildSyntheticStatusReport({
+      providerLiveProbes: [
+        makeProviderSuccessProbe(
+          "synthetic",
+          { "synthetic api key": "configured=true source=env:SYNTHETIC_API_KEY" },
+          {
+            errors: [
+              {
+                label: "Synthetic",
+                message: "Synthetic returned no quota data for this account.",
+              },
+            ],
+          },
+        ),
+      ],
+    });
+
+    const section = getReportSection(report, "synthetic:");
+    expect(section).toContain("- synthetic api key: configured=true source=env:SYNTHETIC_API_KEY");
+    expect(section).toContain("- live_probe: error");
+    expect(section).toContain("- live_error_1: Synthetic returned no quota data for this account.");
+    expect(section).not.toContain("live_entry_");
+    expect(section).not.toContain("5h:");
+    expect(section).not.toContain("Weekly:");
+    expect(section).not.toContain("Clerk");
+    expect(section).not.toContain("invalid");
+    expect(section).not.toContain("subscription");
+    expect(syntheticMocks.querySyntheticQuota).not.toHaveBeenCalled();
+  });
+
   it("renders compact live probes in mapped and probe-only provider sections", async () => {
     const report = await buildQuotaStatusReportForTest({
       enabledProviders: [
         "openai",
-        "qwen-code",
         "alibaba-coding-plan",
+        "alibaba-token-plan",
         "minimax-coding-plan",
         "copilot",
-        "google-antigravity",
         "google-gemini-cli",
         "chutes",
       ],
@@ -883,19 +763,20 @@ describe("buildQuotaStatusReport", () => {
             },
           ],
         }),
-        makeProviderProbe("qwen-code", {
+        makeProviderProbe("alibaba-coding-plan"),
+        makeProviderProbe("alibaba-token-plan", {
           attempted: true,
           entries: [
             {
-              label: "Daily",
-              name: "Qwen Code Daily",
-              percentRemaining: 88,
-              right: "120/1000",
-              resetTimeIso: "2026-04-22T00:00:00.000Z",
+              label: "5h",
+              name: "Alibaba Personal Token Plan 5h",
+              percentUsed: 20,
+              percentRemaining: 80,
+              right: "20%",
+              resetTimeIso: "2026-04-22T05:00:00.000Z",
             },
           ],
         }),
-        makeProviderProbe("alibaba-coding-plan"),
         makeProviderSuccessProbe(
           "minimax-coding-plan",
           { auth_state: "none" },
@@ -912,7 +793,6 @@ describe("buildQuotaStatusReport", () => {
           },
         ),
         makeProviderSafeFailureProbe("copilot", {}, "Billing endpoint unavailable"),
-        makeProviderProbe("google-antigravity"),
         makeProviderSuccessProbe(
           "google-gemini-cli",
           { auth_state: "missing", companion_package_state: "missing" },
@@ -942,14 +822,15 @@ describe("buildQuotaStatusReport", () => {
       "- live_entry_1: Pro 91/100 percent_remaining=91 reset_at=2026-04-22T00:00:00.000Z",
     );
 
-    const qwenSection = getReportSection(report, "qwen_code:");
-    expect(qwenSection).toContain("- live_probe: success");
-    expect(qwenSection).toContain(
-      "- live_entry_1: Daily 120/1000 percent_remaining=88 reset_at=2026-04-22T00:00:00.000Z",
-    );
+    expect(report).not.toContain("qwen_code:");
 
     const alibabaSection = getReportSection(report, "alibaba_coding_plan:");
     expect(alibabaSection).toContain("- live_probe: no_data");
+    expect(alibabaSection).not.toContain("alibaba-token-plan");
+
+    const alibabaTokenPlanSection = getReportSection(report, "alibaba_token_plan:");
+    expect(alibabaTokenPlanSection).toContain("- live_probe: success");
+    expect(alibabaTokenPlanSection).not.toContain("alibaba-coding-plan");
 
     const minimaxSection = getReportSection(report, "minimax:");
     expect(minimaxSection).toContain("- auth_state: none");
@@ -962,8 +843,7 @@ describe("buildQuotaStatusReport", () => {
     expect(copilotSection).toContain("- live_probe: error");
     expect(copilotSection).toContain("- live_error_1: Billing endpoint unavailable");
 
-    const googleSection = getReportSection(report, "google_antigravity:");
-    expect(googleSection).toContain("- live_probe: no_data");
+    expect(report).not.toContain("google_antigravity:");
 
     const geminiCliSection = getReportSection(report, "google_gemini_cli:");
     expect(geminiCliSection).toContain("- auth_state: missing");
@@ -1064,7 +944,7 @@ describe("buildQuotaStatusReport", () => {
         makeProviderSuccessProbe("nanogpt", {
           api_key_configured: "true",
           api_key_source: "env:NANOGPT_API_KEY",
-          api_key_auth_paths: "/tmp/auth.json",
+          api_key_credential_database_paths: "/tmp/opencode.db",
           subscription_active: "false",
           subscription_state: "grace",
           enforce_daily_limit: "true",
@@ -1084,7 +964,7 @@ describe("buildQuotaStatusReport", () => {
     expect(report).toContain("nanogpt:");
     expect(report).toContain("- api_key_configured: true");
     expect(report).toContain("- api_key_source: env:NANOGPT_API_KEY");
-    expect(report).toContain("- api_key_auth_paths: /tmp/auth.json");
+    expect(report).toContain("- api_key_credential_database_paths: /tmp/opencode.db");
     expect(report).toContain("- subscription_active: false");
     expect(report).toContain("- subscription_state: grace");
     expect(report).toContain("- enforce_daily_limit: true");
@@ -1124,6 +1004,60 @@ describe("buildQuotaStatusReport", () => {
     expect(report).toContain("- reset_at: 2026-07-01T00:00:00.000Z");
   });
 
+  it("formats semantic quantity and boolean live probe rows with shared accounting text", async () => {
+    const report = await buildProviderStatusReport("deepseek", {
+      providerLiveProbes: [
+        makeProviderSuccessProbe(
+          "deepseek",
+          {},
+          {
+            entries: [
+              {
+                kind: "quantity",
+                accounting: {
+                  resultType: "balance",
+                  acquisitionMethod: "remote_api",
+                  ownership: "maintained",
+                  authority: "provider_reported",
+                },
+                name: "internal-total-name",
+                group: "DeepSeek",
+                semantic: {
+                  metric: { kind: "component", component: "total_balance" },
+                  prominence: "primary",
+                },
+                quantity: { decimal: "12.345", unit: { kind: "currency", code: "USD" } },
+              },
+              {
+                kind: "boolean",
+                accounting: {
+                  resultType: "status",
+                  acquisitionMethod: "remote_api",
+                  ownership: "maintained",
+                  authority: "provider_reported",
+                },
+                name: "internal-availability-name",
+                group: "DeepSeek",
+                semantic: {
+                  metric: { kind: "named", name: "Availability" },
+                  prominence: "primary",
+                },
+                value: false,
+              },
+            ],
+            errors: [],
+          },
+        ),
+      ],
+    });
+
+    const section = getReportSection(report, "deepseek:");
+    expect(section).toContain("- live_entry_1: Total balance value=USD 12.35");
+    expect(section).toContain("- live_entry_2: Availability value=Low balance");
+    expect(section).not.toContain("internal-total-name");
+    expect(section).not.toContain("internal-availability-name");
+  });
+
   it("reports DeepSeek API key diagnostics", async () => {
     const report = await buildProviderStatusReport("deepseek", {
       providerLiveProbes: [
@@ -1131,7 +1065,7 @@ describe("buildQuotaStatusReport", () => {
           api_key_configured: "true",
           api_key_source: "env:DEEPSEEK_API_KEY",
           api_key_checked_paths: "env:DEEPSEEK_API_KEY",
-          api_key_auth_paths: "/tmp/auth.json",
+          api_key_credential_database_paths: "/tmp/opencode.db",
         }),
       ],
     });
@@ -1140,26 +1074,91 @@ describe("buildQuotaStatusReport", () => {
     expect(report).toContain("- api_key_configured: true");
     expect(report).toContain("- api_key_source: env:DEEPSEEK_API_KEY");
     expect(report).toContain("- api_key_checked_paths: env:DEEPSEEK_API_KEY");
-    expect(report).toContain("- api_key_auth_paths: /tmp/auth.json");
+    expect(report).toContain("- api_key_credential_database_paths: /tmp/opencode.db");
     expect(report).toContain("- deepseek: pricing=no (account balance only (not token-priced))");
   });
 
-  it("reports LLMGate login-token diagnostics", async () => {
-    llmGateMocks.getLlmGateAuthDiagnostics.mockResolvedValueOnce({
-      configured: true,
-      accessTokenConfigured: true,
-      refreshTokenConfigured: true,
-      authPaths: ["/tmp/auth.json"],
+  it("reports OpenRouter API key diagnostics from the live probe", async () => {
+    const report = await buildProviderStatusReport("openrouter", {
+      providerLiveProbes: [
+        makeProviderSuccessProbe("openrouter", {
+          api_key_configured: "true",
+          api_key_source: "env",
+          api_key_checked_paths: "env:OPENROUTER_API_KEY",
+          api_key_credential_database_paths: "/tmp/opencode.db",
+        }),
+      ],
     });
 
-    const report = await buildProviderStatusReport("llmgate");
+    const section = getReportSection(report, "openrouter:");
+    expect(section).toContain("- api_key_configured: true");
+    expect(section).toContain("- api_key_source: env");
+    expect(section).toContain("- api_key_checked_paths: env:OPENROUTER_API_KEY");
+    expect(section).toContain("- api_key_credential_database_paths: /tmp/opencode.db");
+    expect(openrouterMocks.resolveOpenRouterApiKey).not.toHaveBeenCalled();
+    expect(openrouterMocks.queryOpenRouterQuota).not.toHaveBeenCalled();
+    expect(openrouterMocks.hasOpenRouterApiKeyConfigured).not.toHaveBeenCalled();
+  });
 
-    expect(report).toContain("llmgate:");
-    expect(report).toContain("- quota_token_pair: configured");
-    expect(report).toContain("- access_token_metadata: configured");
-    expect(report).toContain("- refresh_token_metadata: configured");
-    expect(report).toContain("- auth_paths: /tmp/auth.json");
-    expect(report).toContain("- llmgate: pricing=no (dashboard credit quota (not token-priced))");
+  it("reports the OpenRouter live probe error", async () => {
+    const report = await buildProviderStatusReport("openrouter", {
+      providerLiveProbes: [
+        makeProviderSuccessProbe(
+          "openrouter",
+          {
+            api_key_configured: "true",
+            api_key_source: "opencode.db",
+          },
+          {
+            errors: [{ label: "OpenRouter", message: "HTTP 401" }],
+          },
+        ),
+      ],
+    });
+
+    const section = getReportSection(report, "openrouter:");
+    expect(section).toContain("- api_key_configured: true");
+    expect(section).toContain("- api_key_source: opencode.db");
+    expect(section).toContain("- live_probe: error");
+    expect(section).toContain("- live_error_1: HTTP 401");
+    expect(openrouterMocks.resolveOpenRouterApiKey).not.toHaveBeenCalled();
+    expect(openrouterMocks.queryOpenRouterQuota).not.toHaveBeenCalled();
+  });
+
+  it("keeps an empty OpenRouter section when the live probe is absent", async () => {
+    const report = await buildProviderStatusReport("openrouter");
+
+    expect(getReportSection(report, "openrouter:")).toBe("openrouter:\n");
+    expect(report).not.toContain("live_probe");
+    expect(openrouterMocks.resolveOpenRouterApiKey).not.toHaveBeenCalled();
+    expect(openrouterMocks.queryOpenRouterQuota).not.toHaveBeenCalled();
+    expect(openrouterMocks.hasOpenRouterApiKeyConfigured).not.toHaveBeenCalled();
+  });
+
+  it("does not leak OpenRouter secret canaries in quota_status", async () => {
+    const secret = "sk-or-status-secret-canary";
+    const report = await buildProviderStatusReport("openrouter", {
+      providerLiveProbes: [
+        makeProviderSuccessProbe(
+          "openrouter",
+          {
+            api_key_configured: "true",
+            api_key_source: "env",
+            api_key_checked_paths: "env:OPENROUTER_API_KEY",
+            api_key_credential_database_paths: "/tmp/opencode.db",
+          },
+          {
+            errors: [{ label: "OpenRouter", message: "HTTP 401" }],
+          },
+        ),
+      ],
+    });
+
+    const section = getReportSection(report, "openrouter:");
+    expect(section).toContain("- api_key_source: env");
+    expect(section).toContain("- live_error_1: HTTP 401");
+    expect(report).not.toContain(secret);
+    expect(section).not.toContain("sk-or-");
   });
 
   it("reports the xAI live quota probe", async () => {
@@ -1190,80 +1189,162 @@ describe("buildQuotaStatusReport", () => {
     );
   });
 
-  it("reports OpenCode Go rolling, weekly, and monthly live usage when configured", async () => {
+  it("reports OpenCode Go auth and normalized usage API details", async () => {
     const report = await buildOpenCodeGoStatusReport({
       providerAvailability: [makeProviderAvailability("opencode-go")],
       providerLiveProbes: [
         makeProviderSuccessProbe("opencode-go", {
-          config_state: "configured",
-          config_source: "env",
+          auth_state: "configured",
+          auth_source: "env:OPENCODE_API_KEY",
+          auth_checked_paths: "env:OPENCODE_API_KEY | provider.opencode.options.apiKey",
+          credential_database_paths: "/tmp/opencode.db",
           selected_windows: "rolling,weekly,monthly",
           rolling_usage:
-            "percent_used=7 percent_remaining=93 reset_in_sec=18000 reset_at=2026-03-12T17:45:00.000Z",
+            "status=ok percent_used=7 percent_remaining=93 reset_at=2026-03-12T17:45:00.000Z",
           weekly_usage:
-            "percent_used=22 percent_remaining=78 reset_in_sec=540000 reset_at=2026-03-18T18:45:00.000Z",
+            "status=ok percent_used=22 percent_remaining=78 reset_at=2026-03-18T18:45:00.000Z",
           monthly_usage:
-            "percent_used=64 percent_remaining=36 reset_in_sec=2480000 reset_at=2026-04-10T05:38:20.000Z",
+            "status=ok percent_used=64 percent_remaining=36 reset_at=2026-04-10T05:38:20.000Z",
+          config_state: "configured",
+          workspace_id: "workspace-secret",
+          auth_cookie: "cookie-secret",
+          reset_in_sec: "18000",
         }),
       ],
     });
 
-    expect(report).toContain("opencode_go:");
-    expect(report).toContain("- config_state: configured");
-    expect(report).toContain("- config_source: env");
-    expect(report).toContain("- selected_windows: rolling,weekly,monthly");
-    expect(report).toContain(
-      "- rolling_usage: percent_used=7 percent_remaining=93 reset_in_sec=18000 reset_at=2026-03-12T17:45:00.000Z",
+    const section = getReportSection(report, "opencode_go:");
+    expect(section).toContain("- auth_state: configured");
+    expect(section).toContain("- auth_source: env:OPENCODE_API_KEY");
+    expect(section).toContain(
+      "- auth_checked_paths: env:OPENCODE_API_KEY | provider.opencode.options.apiKey",
     );
-    expect(report).toContain(
-      "- weekly_usage: percent_used=22 percent_remaining=78 reset_in_sec=540000 reset_at=2026-03-18T18:45:00.000Z",
+    expect(section).toContain("- credential_database_paths: /tmp/opencode.db");
+    expect(section).toContain("- selected_windows: rolling,weekly,monthly");
+    expect(section).toContain(
+      "- rolling_usage: status=ok percent_used=7 percent_remaining=93 reset_at=2026-03-12T17:45:00.000Z",
     );
+    expect(section).toContain(
+      "- weekly_usage: status=ok percent_used=22 percent_remaining=78 reset_at=2026-03-18T18:45:00.000Z",
+    );
+    expect(section).toContain(
+      "- monthly_usage: status=ok percent_used=64 percent_remaining=36 reset_at=2026-04-10T05:38:20.000Z",
+    );
+    expect(section).not.toContain("config_");
+    expect(section).not.toContain("workspace");
+    expect(section).not.toContain("cookie");
+    expect(section).not.toContain("reset_in_sec");
     expect(report).toContain(
-      "- monthly_usage: percent_used=64 percent_remaining=36 reset_in_sec=2480000 reset_at=2026-04-10T05:38:20.000Z",
+      "- opencode-go: pricing=no (subscription percentage quota from the OpenCode Go usage API (not token-priced))",
     );
   });
 
-  it("reports OpenCode Go invalid config details without attempting a live fetch", async () => {
+  it("reports which source answered OpenCode Go and why the Console failed", async () => {
     const report = await buildOpenCodeGoStatusReport({
+      providerAvailability: [makeProviderAvailability("opencode-go")],
       providerLiveProbes: [
         makeProviderProbe("opencode-go", {
           statusDetails: makeStatusDetails({
-            config_state: "invalid",
-            config_source: "/tmp/config/opencode-quota/opencode-go.json",
-            config_error: "Config file must contain a JSON object",
-            config_checked_paths: "/tmp/config/opencode-quota/opencode-go.json",
+            auth_state: "none",
+            console_auth_state: "configured",
+            console_server: "https://opencode.ai",
+            console_error: "OpenCode Console API error 500 (/api/go/status)",
+            go_source: "legacy_key",
+            selected_windows: "rolling,weekly,monthly",
           }),
         }),
       ],
     });
 
-    expect(report).toContain("opencode_go:");
-    expect(report).toContain("- config_state: invalid");
-    expect(report).toContain("- config_source: /tmp/config/opencode-quota/opencode-go.json");
-    expect(report).toContain("- config_error: Config file must contain a JSON object");
-    expect(report).toContain("- config_checked_paths: /tmp/config/opencode-quota/opencode-go.json");
+    const section = getReportSection(report, "opencode_go:");
+    expect(section).toContain("- console_auth_state: configured");
+    expect(section).toContain("- console_server: https://opencode.ai");
+    expect(section).toContain("- console_error: OpenCode Console API error 500 (/api/go/status)");
+    expect(section).toContain("- go_source: legacy_key");
   });
 
-  it("reports OpenCode Zen config and live billing details without exposing credentials", async () => {
+  it("reports safe OpenCode Go invalid-auth details without legacy config fields", async () => {
+    const report = await buildOpenCodeGoStatusReport({
+      providerLiveProbes: [
+        makeProviderProbe("opencode-go", {
+          statusDetails: makeStatusDetails({
+            auth_state: "invalid",
+            auth_source: "opencode.db",
+            auth_checked_paths: "env:OPENCODE_API_KEY | provider.opencode.options.apiKey",
+            credential_database_paths: "/tmp/opencode.db",
+            auth_error: "opencode.db entry opencode must contain a non-empty API key",
+            selected_windows: "rolling,weekly,monthly",
+            config_state: "invalid",
+            config_error: "legacy secret",
+          }),
+        }),
+      ],
+    });
+
+    const section = getReportSection(report, "opencode_go:");
+    expect(section).toContain("- auth_state: invalid");
+    expect(section).toContain("- auth_source: opencode.db");
+    expect(section).toContain("- credential_database_paths: /tmp/opencode.db");
+    expect(section).toContain(
+      "- auth_error: opencode.db entry opencode must contain a non-empty API key",
+    );
+    expect(section).toContain("- selected_windows: rolling,weekly,monthly");
+    expect(section).not.toContain("config_");
+    expect(section).not.toContain("legacy secret");
+  });
+
+  it("reports safe OpenCode Go usage API failures", async () => {
+    const report = await buildOpenCodeGoStatusReport({
+      providerAvailability: [makeProviderAvailability("opencode-go")],
+      providerLiveProbes: [
+        makeProviderSafeFailureProbe(
+          "opencode-go",
+          {
+            auth_state: "configured",
+            auth_source: "opencode.db",
+            auth_checked_paths: "env:OPENCODE_API_KEY",
+            credential_database_paths: "/tmp/opencode.db",
+            selected_windows: "rolling,weekly,monthly",
+            live_fetch_error: "OpenCode Go API error 503: unavailable",
+            dashboard_url: "https://opencode.ai/workspace/private",
+          },
+          "OpenCode Go API error 503: unavailable",
+        ),
+      ],
+    });
+
+    const section = getReportSection(report, "opencode_go:");
+    expect(section).toContain("- live_fetch_error: OpenCode Go API error 503: unavailable");
+    expect(section).toContain("- live_probe: error");
+    expect(section).toContain("- live_error_1: OpenCode Go API error 503: unavailable");
+    expect(section).not.toContain("dashboard");
+    expect(section).not.toContain("workspace/private");
+  });
+
+  it("reports OpenCode Zen Console sign-in and live billing details without exposing credentials", async () => {
     const report = await buildOpenCodeZenStatusReport({
       providerLiveProbes: [
         makeProviderSuccessProbe("opencode", {
-          config_state: "configured",
-          config_source: "env(OPENCODE_*)",
-          balance_usd: "$42.50",
-          monthly_limit_usd: "$50.00",
-          last_payment_usd: "$20.00",
+          console_auth_state: "configured",
+          console_server: "https://opencode.ai/console",
+          console_org: "Acme",
+          balance_usd: "USD 42.5",
+          monthly_limit_usd: "USD 50",
+          monthly_usage_usd: "USD 11.82",
+          budget_source: "org_budget",
         }),
       ],
     });
 
     expect(report).toContain("opencode_zen:");
-    expect(report).toContain("- config_state: configured");
-    expect(report).toContain("- config_source: env(OPENCODE_*)");
-    expect(report).toContain("- balance_usd: $42.50");
-    expect(report).toContain("- monthly_limit_usd: $50.00");
-    expect(report).toContain("- last_payment_usd: $20.00");
-    expect(report).not.toContain("wrk-secret");
+    expect(report).toContain("- console_auth_state: configured");
+    expect(report).toContain("- console_server: https://opencode.ai/console");
+    expect(report).toContain("- console_org: Acme");
+    expect(report).toContain("- balance_usd: USD 42.5");
+    expect(report).toContain("- monthly_limit_usd: USD 50");
+    expect(report).toContain("- monthly_usage_usd: USD 11.82");
+    expect(report).toContain("- budget_source: org_budget");
+    expect(report).not.toContain("st-secret-token");
   });
 
   it("does not retry a failed OpenCode Zen live probe", async () => {
@@ -1274,10 +1355,10 @@ describe("buildQuotaStatusReport", () => {
           result: {
             attempted: true,
             entries: [],
-            errors: [{ label: "OpenCode", message: "Request timeout after 10s" }],
+            errors: [{ label: "OpenCode Zen", message: "Request timeout after 10s" }],
             statusDetails: makeStatusDetails({
-              config_state: "configured",
-              config_source: "env(OPENCODE_*)",
+              console_auth_state: "configured",
+              console_server: "https://opencode.ai/console",
             }),
           },
         },
@@ -1287,21 +1368,17 @@ describe("buildQuotaStatusReport", () => {
     expect(report).toContain("- live_probe: error");
   });
 
-  it("reports a fixed OpenCode Zen parse error without attempting a live fetch", async () => {
+  it("reports a missing OpenCode Console sign-in without attempting a live fetch", async () => {
     const report = await buildOpenCodeZenStatusReport({
       providerLiveProbes: [
         makeProviderProbe("opencode", {
-          statusDetails: makeStatusDetails({
-            config_state: "invalid",
-            config_error: "Failed to parse JSON",
-          }),
+          statusDetails: makeStatusDetails({ console_auth_state: "none" }),
         }),
       ],
     });
 
     expect(report).toContain("opencode_zen:");
-    expect(report).toContain("- config_state: invalid");
-    expect(report).toContain("- config_error: Failed to parse JSON");
+    expect(report).toContain("- console_auth_state: none");
   });
 
   it("reports safe Xiaomi config and partial live summaries without exposing cookie data", async () => {
@@ -1373,9 +1450,9 @@ describe("buildQuotaStatusReport", () => {
         makeProviderSuccessProbe("minimax-coding-plan", {
           auth_state: "configured",
           api_key_configured: "true",
-          api_key_source: "auth.json",
+          api_key_source: "opencode.db",
           api_key_checked_paths: "(none)",
-          api_key_auth_paths: "/tmp/auth.json",
+          api_key_credential_database_paths: "/tmp/opencode.db",
           five_hour_usage: "70/4500 percent_remaining=98 reset_at=2026-03-25T18:00:00.000Z",
           weekly_usage: "105/45000 percent_remaining=100 reset_at=2026-04-01T00:00:00.000Z",
         }),
@@ -1386,9 +1463,9 @@ describe("buildQuotaStatusReport", () => {
     expect(report).toContain("minimax:");
     expect(report).toContain("- auth_state: configured");
     expect(report).toContain("- api_key_configured: true");
-    expect(report).toContain("- api_key_source: auth.json");
+    expect(report).toContain("- api_key_source: opencode.db");
     expect(report).toContain("- api_key_checked_paths: (none)");
-    expect(report).toContain("- api_key_auth_paths: /tmp/auth.json");
+    expect(report).toContain("- api_key_credential_database_paths: /tmp/opencode.db");
     expect(report).toContain(
       "- five_hour_usage: 70/4500 percent_remaining=98 reset_at=2026-03-25T18:00:00.000Z",
     );
@@ -1460,20 +1537,80 @@ describe("buildQuotaStatusReport", () => {
     expect(section).not.toContain("live_error");
   });
 
+  it("reports the login source, its last list error, and each login OpenCode could not return", async () => {
+    credentialSourceMocks.getCredentialSourceDiagnostics.mockReturnValueOnce({
+      state: "bound",
+      kind: "opencode-integration-api",
+      lastListError: { at: 1, detail: "Invalid credential value" },
+      failures: [
+        {
+          integrationId: "openai",
+          connectionId: "cred_1",
+          label: "Work",
+          category: "refresh_failed",
+          detail: "HTTP 401 [redacted]",
+          at: 2,
+        },
+        {
+          integrationId: "xai",
+          connectionId: "xai",
+          label: "",
+          category: "active_failed",
+          detail: "database is locked",
+          at: 3,
+        },
+      ],
+    } as never);
+
+    const report = await buildQuotaStatusReportForTest();
+
+    expect(getReportSection(report, "credential_source:")).toMatchInlineSnapshot(`
+      "credential_source:
+      - source: opencode-integration-api
+      - list_error: Invalid credential value
+      - failures: openai:Work:refresh_failed:HTTP 401 [redacted] | xai::active_failed:database is locked
+      "
+    `);
+  });
+
+  it("reports the terminal command's database login source", async () => {
+    credentialSourceMocks.getCredentialSourceDiagnostics.mockReturnValueOnce({
+      state: "bound",
+      kind: "sqlite",
+      failures: [],
+    } as never);
+
+    const report = await buildQuotaStatusReportForTest();
+
+    expect(getReportSection(report, "credential_source:")).toMatchInlineSnapshot(`
+      "credential_source:
+      - source: sqlite
+      - list_error: (none)
+      - failures: (none)
+      "
+    `);
+  });
+
+  it("reports an unbound login source", async () => {
+    credentialSourceMocks.getCredentialSourceDiagnostics.mockReturnValueOnce({
+      state: "unbound",
+      failures: [],
+    } as never);
+
+    const report = await buildQuotaStatusReportForTest();
+
+    expect(getReportSection(report, "credential_source:")).toContain("- source: unbound");
+  });
+
   it("locks the early /quota_status section layout after the shared report-document migration", async () => {
     const report = await buildProviderStatusReport("copilot", {
       configSource: "defaults",
       providerLiveProbes: [
-        makeProviderSuccessProbe("qwen-code", {
-          "qwen oauth auth configured": "false",
-          qwen_oauth_source: "(none)",
-          qwen_local_plan: "(none)",
-        }),
         makeProviderSuccessProbe("alibaba-coding-plan", {
           "alibaba auth configured": "false",
           alibaba_api_key_source: "(none)",
           alibaba_api_key_checked_paths: "(none)",
-          alibaba_api_key_auth_paths: "/tmp/auth.json",
+          alibaba_api_key_credential_database_paths: "/tmp/opencode.db",
           alibaba_coding_plan: "(none)",
         }),
         makeProviderSuccessProbe("openai", {
@@ -1487,12 +1624,13 @@ describe("buildQuotaStatusReport", () => {
         makeProviderSuccessProbe("anthropic", {
           cli_installed: "true",
           cli_version: "1.2.3",
+          binary_path: "claude (PATH)",
           auth_status: "authenticated",
           quota_supported: "false",
           quota_source: "(none)",
           checked_commands: "claude --version | claude auth status --json",
           message:
-            "Claude CLI auth detected, but quota was unavailable from both the local CLI and Claude OAuth fallback. Claude credentials file not found at /Users/test/.claude/.credentials.json.",
+            "Claude CLI auth detected, but quota was unavailable from the local CLI and OAuth credential sources. Claude credentials file not found at /Users/test/.claude/.credentials.json.",
         }),
         makeProviderSuccessProbe("cursor", {
           plan: "none",
@@ -1508,7 +1646,7 @@ describe("buildQuotaStatusReport", () => {
     );
     expect(blank).toBe("");
 
-    const excerpt = body.slice(0, 48).join("\n");
+    const excerpt = body.slice(0, 53).join("\n");
     expect(excerpt).toMatchInlineSnapshot(`
       "toast:
       - configSource: defaults
@@ -1518,8 +1656,6 @@ describe("buildQuotaStatusReport", () => {
       - workspace_config_paths: (none)
       - setting_sources: (none)
       - enabledProviders: copilot
-      - googleModels: CLAUDE
-      - googleModels_source: default
       - onlyCurrentModel: false
       - currentModel: (unknown)
       - providers:
@@ -1527,15 +1663,17 @@ describe("buildQuotaStatusReport", () => {
 
       paths:
       - opencode_dirs: data=/tmp/data config=/tmp/config cache=/tmp/cache state=/tmp/state
-      - auth.json: preferred=/tmp/auth.json present=(none) candidates=/tmp/auth.json
-      - qwen oauth auth configured: false
-      - qwen_oauth_source: (none)
-      - qwen_local_plan: (none)
+      - opencode.db: path=/tmp/opencode.db present=false (session and token history)
       - alibaba auth configured: false
       - alibaba_api_key_source: (none)
       - alibaba_api_key_checked_paths: (none)
-      - alibaba_api_key_auth_paths: /tmp/auth.json
+      - alibaba_api_key_credential_database_paths: /tmp/opencode.db
       - alibaba_coding_plan: (none)
+
+      credential_source:
+      - source: opencode-integration-api
+      - list_error: (none)
+      - failures: (none)
 
       openai:
       - auth_configured: false
@@ -1548,16 +1686,21 @@ describe("buildQuotaStatusReport", () => {
       anthropic:
       - cli_installed: true
       - cli_version: 1.2.3
+      - binary_path: claude (PATH)
       - auth_status: authenticated
       - quota_supported: false
       - quota_source: (none)
       - checked_commands: claude --version | claude auth status --json
-      - message: Claude CLI auth detected, but quota was unavailable from both the local CLI and Claude OAuth fallback. Claude credentials file not found at /Users/test/.claude/.credentials.json.
+      - message: Claude CLI auth detected, but quota was unavailable from the local CLI and OAuth credential sources. Claude credentials file not found at /Users/test/.claude/.credentials.json.
 
       cursor:
       - plan: none
       - included_api_usd: (none)
-      - billing_cycle_start_day: (calendar month)"
+      - billing_cycle_start_day: (calendar month)
+
+      minimax:
+
+      minimax_china:"
     `);
 
     const titles = report
@@ -1567,12 +1710,14 @@ describe("buildQuotaStatusReport", () => {
     expect(titles).toMatchInlineSnapshot(`
       "toast:
 paths:
+credential_source:
 openai:
 anthropic:
 cursor:
 minimax:
 minimax_china:
 kimi:
+kimi_cn:
 opencode_go:
 opencode_zen:
 xiaomi:
@@ -1584,9 +1729,9 @@ deepseek:
 vilao:
 xai:
 nanogpt:
+openrouter:
 copilot_quota_auth:
 llmgate:
-google_antigravity:
 google_gemini_cli:
 google_agy:
 storage:

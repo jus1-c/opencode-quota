@@ -1,23 +1,22 @@
 import { stat } from "fs/promises";
-import { getLlmGateAuthDiagnostics } from "./llmgate.js";
+import { homedir } from "os";
 import { getProviders } from "../providers/registry.js";
+import { interpretAccountingRow } from "./accounting-format.js";
 import {
   type LoadConfigIssue,
   QUOTA_TOAST_SETTING_SOURCE_KEYS,
   type QuotaToastSettingSources,
 } from "./config.js";
-import {
-  sanitizeQuotaProviderResult,
-  sanitizeSingleLineDisplaySnippet,
-  sanitizeSingleLineDisplayText,
-} from "./display-sanitize.js";
+import type { RuntimeContextRoots } from "./config-file-utils.js";
+import { sanitizeQuotaProviderResult, sanitizeSingleLineDisplayText } from "./display-sanitize.js";
 import type {
   QuotaProviderDiagnostic,
   QuotaProviderResult,
   QuotaToastEntry,
   QuotaToastError,
 } from "./entries.js";
-import { isValueEntry } from "./entries.js";
+import { replaceHomeDirWithTilde, replaceHomeDirWithTildeInDocument } from "./home-dir-display.js";
+import { getLlmGateAuthDiagnostics } from "./llmgate.js";
 import type { MaintainerAnnouncementsSummary } from "./maintainer-announcements.js";
 import {
   getPricingRefreshPolicy,
@@ -31,18 +30,21 @@ import {
   readPricingRefreshState,
   hasProvider as snapshotHasProvider,
 } from "./modelsdev-pricing.js";
-import { getAuthPath, getAuthPaths } from "./opencode-auth.js";
+import { getCredentialSourceDiagnostics } from "./opencode-auth.js";
+import { getOpenCodeDbPath } from "./opencode-db-path.js";
 import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
-import {
-  getOpenCodeDbPath,
-  getOpenCodeDbPathCandidates,
-  getOpenCodeDbStats,
-} from "./opencode-storage.js";
+import { getOpenCodeDbStats } from "./opencode-storage.js";
 import { getQuotaProviderDisplayLabel } from "./provider-metadata.js";
 import type { QuotaProviderDefinition } from "./quota-providers.js";
 import { isMaintainedQuotaProviderTuning } from "./quota-providers.js";
 import { aggregateUsage } from "./quota-stats.js";
-import { type ReportKvRow, type ReportSection, renderPlainTextReport } from "./report-document.js";
+import {
+  commandHeading,
+  type ReportDocument,
+  type ReportKvRow,
+  type ReportSection,
+  renderPlainTextReport,
+} from "./report-document.js";
 import { totalTokenBuckets } from "./token-buckets.js";
 import type {
   CursorQuotaPlan,
@@ -82,6 +84,23 @@ const STATUS_SAMPLE_LIMIT = 5;
 const STATUS_LIVE_ENTRY_LIMIT = 2;
 const STATUS_LIVE_ERROR_LIMIT = 2;
 const STATUS_LIVE_ROW_MAX_LENGTH = 120;
+const OPENCODE_GO_STATUS_DETAIL_KEYS = new Set([
+  "auth_state",
+  "auth_source",
+  "auth_checked_paths",
+  "credential_database_paths",
+  "auth_error",
+  "selected_windows",
+  "rolling_usage",
+  "weekly_usage",
+  "monthly_usage",
+  "live_fetch_error",
+  "opencode_go_state",
+  "go_source",
+  "console_error",
+  "console_auth_state",
+  "console_server",
+]);
 type ProviderLiveProbe = {
   providerId: string;
   result: QuotaProviderResult;
@@ -105,11 +124,6 @@ function formatSettingSources(sources: QuotaToastSettingSources | undefined): st
   ).map((key) => `${key}<=${sources[key]}`);
 
   return parts.length > 0 ? parts.join(" | ") : "(none)";
-}
-
-function formatGoogleModelsSource(sources: QuotaToastSettingSources | undefined): string {
-  const source = sources?.googleModels;
-  return source ? `configuration file (${sanitizeSingleLineDisplayText(source)})` : "default";
 }
 
 function getConfigPrecedenceLabel(configSource: string): string {
@@ -206,10 +220,11 @@ function appendProviderCompactLiveProbeRows(
   providerId: string,
   probes: ProviderLiveProbe[] | undefined,
   availability: ProviderAvailability[],
+  homeDir: string,
 ): void {
   const provider = availability.find((item) => item.id === providerId);
   if (!provider?.enabled || !provider.available) return;
-  appendCompactLiveProbeRows(rows, providerId, findProviderLiveProbe(providerId, probes));
+  appendCompactLiveProbeRows(rows, providerId, findProviderLiveProbe(providerId, probes), homeDir);
 }
 
 function createCompactLiveProbeOnlySection(params: {
@@ -218,6 +233,7 @@ function createCompactLiveProbeOnlySection(params: {
   providerId: string;
   probes?: ProviderLiveProbe[];
   availability: ProviderAvailability[];
+  homeDir: string;
 }): ReportSection | null {
   const provider = params.availability.find((item) => item.id === params.providerId);
   if (!provider?.enabled || !provider.available) return null;
@@ -227,7 +243,7 @@ function createCompactLiveProbeOnlySection(params: {
   }
 
   const rows: ReportKvRow[] = [];
-  appendCompactLiveProbeRows(rows, params.providerId, probe);
+  appendCompactLiveProbeRows(rows, params.providerId, probe, params.homeDir);
   return createKvSection(params.id, params.title, rows);
 }
 
@@ -238,19 +254,32 @@ function createProviderStatusSection(params: {
   probes?: ProviderLiveProbe[];
   availability: ProviderAvailability[];
   includeDetails?: boolean;
+  detailKeys?: ReadonlySet<string>;
+  homeDir: string;
 }): ReportSection {
   const rows: ReportKvRow[] = [];
   if (params.includeDetails !== false) {
-    appendProviderStatusDetailRows(rows, params.providerId, params.probes);
+    appendProviderStatusDetailRows(rows, params.providerId, params.probes, params.detailKeys);
   }
-  appendProviderCompactLiveProbeRows(rows, params.providerId, params.probes, params.availability);
+  appendProviderCompactLiveProbeRows(
+    rows,
+    params.providerId,
+    params.probes,
+    params.availability,
+    params.homeDir,
+  );
   return createKvSection(params.id, params.title, rows);
 }
 
 function getCompactLiveProbeDescriptor(
   providerId: string,
   entry: QuotaToastEntry,
+  semanticLabel: string,
 ): string | undefined {
+  if (entry.semantic) {
+    return sanitizeSingleLineDisplayText(semanticLabel);
+  }
+
   const candidates = [entry.label, entry.name, entry.group];
   for (const candidate of candidates) {
     if (typeof candidate !== "string") continue;
@@ -263,21 +292,41 @@ function getCompactLiveProbeDescriptor(
   return undefined;
 }
 
-function formatCompactLiveProbeEntry(providerId: string, entry: QuotaToastEntry): string {
+/**
+ * One live probe row, cut to its length limit. The home dir becomes "~" before the cut, so a
+ * cut inside a home path cannot leave part of the user name (e.g. "/Users/ali").
+ */
+function shortenLiveRowText(text: string, homeDir: string): string {
+  return replaceHomeDirWithTilde(sanitizeSingleLineDisplayText(text), homeDir).slice(
+    0,
+    STATUS_LIVE_ROW_MAX_LENGTH,
+  );
+}
+
+function formatCompactLiveProbeEntry(
+  providerId: string,
+  entry: QuotaToastEntry,
+  homeDir: string,
+): string {
+  const interpretation = interpretAccountingRow(entry, { booleanWording: "semantic" });
   const parts: string[] = [];
-  const descriptor = getCompactLiveProbeDescriptor(providerId, entry);
+  const descriptor = getCompactLiveProbeDescriptor(providerId, entry, interpretation.label);
   if (descriptor) {
     parts.push(descriptor);
   }
 
-  if (isValueEntry(entry)) {
-    parts.push(`value=${sanitizeSingleLineDisplayText(entry.value)}`);
+  if (interpretation.display.kind === "value") {
+    const value =
+      interpretation.display.entryKind === "value"
+        ? sanitizeSingleLineDisplayText(interpretation.display.text)
+        : interpretation.display.text;
+    parts.push(`value=${value}`);
   } else {
     if (entry.right) {
       parts.push(sanitizeSingleLineDisplayText(entry.right));
     }
-    const percentRemaining = Number.isFinite(entry.percentRemaining)
-      ? Math.max(0, Math.min(100, Math.round(entry.percentRemaining)))
+    const percentRemaining = Number.isFinite(interpretation.display.percentRemaining)
+      ? Math.max(0, Math.min(100, Math.round(interpretation.display.percentRemaining)))
       : 0;
     parts.push(`percent_remaining=${percentRemaining}`);
   }
@@ -286,18 +335,19 @@ function formatCompactLiveProbeEntry(providerId: string, entry: QuotaToastEntry)
     parts.push(`reset_at=${sanitizeSingleLineDisplayText(entry.resetTimeIso)}`);
   }
 
-  return sanitizeSingleLineDisplaySnippet(parts.join(" "), STATUS_LIVE_ROW_MAX_LENGTH);
+  return shortenLiveRowText(parts.join(" "), homeDir);
 }
 
-function formatCompactLiveProbeError(providerId: string, error: QuotaToastError): string {
+function formatCompactLiveProbeError(
+  providerId: string,
+  error: QuotaToastError,
+  homeDir: string,
+): string {
   const label = isRedundantLiveProbeDescriptor(providerId, error.label)
     ? ""
     : sanitizeSingleLineDisplayText(error.label);
   const message = sanitizeSingleLineDisplayText(error.message);
-  return sanitizeSingleLineDisplaySnippet(
-    label ? `${label}: ${message}` : message,
-    STATUS_LIVE_ROW_MAX_LENGTH,
-  );
+  return shortenLiveRowText(label ? `${label}: ${message}` : message, homeDir);
 }
 
 function getQuotaProviderCredentialCategory(
@@ -309,8 +359,8 @@ function getQuotaProviderCredentialCategory(
     case "global_opencode_json":
     case "global_opencode_jsonc":
       return "trusted_global_config";
-    case "auth_json":
-      return "auth_json";
+    case "opencode_db":
+      return "opencode_db";
     default:
       return "none";
   }
@@ -397,7 +447,7 @@ function createQuotaProvidersSection(params: {
     }
 
     const checkedPaths = diagnostic
-      ? [...new Set([...diagnostic.checkedPaths, ...diagnostic.authPaths])]
+      ? [...new Set([...diagnostic.checkedPaths, ...diagnostic.credentialDatabasePaths])]
       : [];
     rows.push({
       key: `provider_${definition.id}`,
@@ -422,7 +472,8 @@ function createQuotaProvidersSection(params: {
 function appendCompactLiveProbeRows(
   rows: ReportKvRow[],
   providerId: string,
-  probe?: ProviderLiveProbe,
+  probe: ProviderLiveProbe | undefined,
+  homeDir: string,
 ): void {
   if (!probe) return;
 
@@ -443,14 +494,14 @@ function appendCompactLiveProbeRows(
   for (let index = 0; index < entryCount; index += 1) {
     rows.push({
       key: `live_entry_${index + 1}`,
-      value: formatCompactLiveProbeEntry(providerId, result.entries[index]!),
+      value: formatCompactLiveProbeEntry(providerId, result.entries[index]!, homeDir),
     });
   }
 
   for (let index = 0; index < errorCount; index += 1) {
     rows.push({
       key: `live_error_${index + 1}`,
-      value: formatCompactLiveProbeError(providerId, result.errors[index]!),
+      value: formatCompactLiveProbeError(providerId, result.errors[index]!, homeDir),
     });
   }
 
@@ -532,19 +583,19 @@ function supportedProviderPricingRow(params: {
     };
   }
 
-  if (id === "qwen-code") {
-    return {
-      id,
-      pricing: "no",
-      notes: "local request-count estimate (free tier, no token pricing API)",
-    };
-  }
-
   if (id === "alibaba-coding-plan") {
     return {
       id,
       pricing: "no",
       notes: "local request-count estimate (tiered rolling windows, no token pricing API)",
+    };
+  }
+
+  if (id === "alibaba-token-plan") {
+    return {
+      id,
+      pricing: "no",
+      notes: "official Alibaba Cloud CLI Personal Token Plan quota (not token-priced)",
     };
   }
 
@@ -593,7 +644,7 @@ function supportedProviderPricingRow(params: {
     return {
       id,
       pricing: "no",
-      notes: "subscription percentage quota via dashboard scraping (not token-priced)",
+      notes: "subscription percentage quota from the OpenCode Go usage API (not token-priced)",
     };
   }
 
@@ -605,7 +656,13 @@ function supportedProviderPricingRow(params: {
     };
   }
 
-  if (id === "kimi-for-coding" || id === "kimi-code") {
+  if (
+    id === "kimi-code-plan-global" ||
+    id === "kimi-code-plan-cn" ||
+    id === "kimi-for-coding" ||
+    id === "kimi-code" ||
+    id === "kimi"
+  ) {
     return {
       id,
       pricing: "no",
@@ -624,13 +681,6 @@ function supportedProviderPricingRow(params: {
     return snapshotHasProvider("openai")
       ? { id, pricing: "yes", notes: "connector (priced via models.dev openai)" }
       : { id, pricing: "partial", notes: "connector (pricing snapshot missing openai)" };
-  }
-
-  // Connector provider; maps to models.dev provider ids depending on model.
-  if (id === "google-antigravity") {
-    return snapshotHasProvider("google") || snapshotHasProvider("anthropic")
-      ? { id, pricing: "yes", notes: "connector (priced via models.dev google/anthropic)" }
-      : { id, pricing: "partial", notes: "connector (pricing snapshot missing google/anthropic)" };
   }
 
   if (id === "google-gemini-cli") {
@@ -666,25 +716,15 @@ function supportedProviderPricingRow(params: {
   };
 }
 
-export async function buildQuotaStatusReport(params: {
+type QuotaStatusReportParams = {
   configSource: string;
   configPaths: string[];
   globalConfigPaths?: string[];
   workspaceConfigPaths?: string[];
   settingSources?: QuotaToastSettingSources;
   configIssues?: LoadConfigIssue[];
-  tuiDiagnostics?: {
-    workspaceRoot: string;
-    configRoot: string;
-    configured: boolean;
-    inferredSelectedPath: string | null;
-    presentPaths: string[];
-    candidatePaths: string[];
-    quotaPluginConfigured: boolean;
-    quotaPluginConfigPaths: string[];
-  };
+  runtimeRoots?: RuntimeContextRoots;
   enabledProviders: string[] | "auto";
-  googleModels: readonly string[];
   anthropicBinaryPath?: string;
   cursorPlan: CursorQuotaPlan;
   cursorIncludedApiUsd?: number;
@@ -698,19 +738,24 @@ export async function buildQuotaStatusReport(params: {
   providerAvailability: ProviderAvailability[];
   providerLiveProbes?: ProviderLiveProbe[];
   quotaProviders?: readonly QuotaProviderDefinition[];
-  googleRefresh?: {
-    attempted: boolean;
-    total?: number;
-    successCount?: number;
-    failures?: Array<{ email?: string; error: string }>;
-  };
   sessionTokenError?: SessionTokenError;
   maintainerAnnouncements?: {
     config: MaintainerAnnouncementsConfig;
     summary: MaintainerAnnouncementsSummary;
   };
   generatedAtMs?: number;
-}): Promise<string> {
+  /** The home dir the report shows as "~"; defaults to the computer's (tests set it). */
+  homeDir?: string;
+};
+
+export async function buildQuotaStatusReport(params: QuotaStatusReportParams): Promise<string> {
+  return renderPlainTextReport(await buildQuotaStatusReportDocument(params));
+}
+
+export async function buildQuotaStatusReportDocument(
+  params: QuotaStatusReportParams,
+): Promise<ReportDocument> {
+  const homeDir = params.homeDir ?? homedir();
   const version = await getPackageVersion();
   const v = version ?? "unknown";
   const modelDisplay = params.currentModel
@@ -731,8 +776,6 @@ export async function buildQuotaStatusReport(params: {
     `- workspace_config_paths: ${joinOrNone(params.workspaceConfigPaths ?? [])}`,
     `- setting_sources: ${formatSettingSources(params.settingSources)}`,
     `- enabledProviders: ${params.enabledProviders === "auto" ? "(auto)" : params.enabledProviders.length ? params.enabledProviders.join(",") : "(none)"}`,
-    `- googleModels: ${params.googleModels.length > 0 ? params.googleModels.join(",") : "(none)"}`,
-    `- googleModels_source: ${formatGoogleModelsSource(params.settingSources)}`,
     `- onlyCurrentModel: ${params.onlyCurrentModel ? "true" : "false"}`,
     `- currentModel: ${modelDisplay}`,
   ];
@@ -744,25 +787,9 @@ export async function buildQuotaStatusReport(params: {
       );
     }
   }
-  if (params.tuiDiagnostics) {
-    toastLines.push("");
-    toastLines.push("tui:");
-    toastLines.push(`- workspace_root: ${params.tuiDiagnostics.workspaceRoot}`);
-    toastLines.push(`- config_root: ${params.tuiDiagnostics.configRoot}`);
-    toastLines.push(`- config_configured: ${params.tuiDiagnostics.configured ? "true" : "false"}`);
-    toastLines.push(
-      `- inferred_selected_config_path: ${params.tuiDiagnostics.inferredSelectedPath ?? "(none)"}`,
-    );
-    toastLines.push(`- present_config_paths: ${joinOrNone(params.tuiDiagnostics.presentPaths)}`);
-    toastLines.push(
-      `- candidate_config_paths: ${joinOrNone(params.tuiDiagnostics.candidatePaths)}`,
-    );
-    toastLines.push(
-      `- quota_plugin_configured: ${params.tuiDiagnostics.quotaPluginConfigured ? "true" : "false"}`,
-    );
-    toastLines.push(
-      `- quota_plugin_paths: ${joinOrNone(params.tuiDiagnostics.quotaPluginConfigPaths)}`,
-    );
+  if (params.runtimeRoots) {
+    toastLines.push(`- workspace_root: ${params.runtimeRoots.workspaceRoot}`);
+    toastLines.push(`- config_root: ${params.runtimeRoots.configRoot}`);
   }
   toastLines.push("- providers:");
   for (const p of params.providerAvailability) {
@@ -791,6 +818,7 @@ export async function buildQuotaStatusReport(params: {
       createLinesSection("maintainer_announcements", "maintainer_announcements:", [
         `- enabled: ${announcements.config.enabled ? "true" : "false"}`,
         `- home: ${announcements.config.home ? "true" : "false"}`,
+        `- home_frequency: ${announcements.config.homeFrequency}`,
         `- source: ${summary.source}`,
         `- network: ${summary.network ? "true" : "false"}`,
         `- active: ${summary.activeCount}`,
@@ -807,29 +835,12 @@ export async function buildQuotaStatusReport(params: {
     key: "opencode_dirs",
     value: `data=${runtime.dataDir} config=${runtime.configDir} cache=${runtime.cacheDir} state=${runtime.stateDir}`,
   });
-  const authCandidates = getAuthPaths();
-  const authPresent: string[] = [];
-  await Promise.all(
-    authCandidates.map(async (p) => {
-      try {
-        await stat(p);
-        authPresent.push(p);
-      } catch {
-        // ignore missing/unreadable
-      }
-    }),
-  );
+  const dbPath = getOpenCodeDbPath();
   pathsRows.push({
-    key: "auth.json",
-    value: `preferred=${getAuthPath()} present=${joinOrNone(authPresent)} candidates=${joinOrNone(authCandidates)}`,
+    key: "opencode.db",
+    value: `path=${dbPath} present=${(await pathExists(dbPath)) ? "true" : "false"} (session and token history)`,
   });
 
-  appendProviderStatusDetailRows(
-    pathsRows,
-    "qwen-code",
-    params.providerLiveProbes,
-    new Set(["qwen oauth auth configured", "qwen_oauth_source", "qwen_local_plan"]),
-  );
   appendProviderStatusDetailRows(
     pathsRows,
     "alibaba-coding-plan",
@@ -838,12 +849,34 @@ export async function buildQuotaStatusReport(params: {
       "alibaba auth configured",
       "alibaba_api_key_source",
       "alibaba_api_key_checked_paths",
-      "alibaba_api_key_auth_paths",
+      "alibaba_api_key_credential_database_paths",
       "alibaba_coding_plan",
       "alibaba_auth_error",
     ]),
   );
   sections.push(createKvSection("paths", "paths:", pathsRows));
+
+  // === credential_source ===
+  const credentialSource = getCredentialSourceDiagnostics();
+  sections.push(
+    createKvSection("credential_source", "credential_source:", [
+      {
+        key: "source",
+        value: credentialSource.state === "bound" ? credentialSource.kind : "unbound",
+      },
+      { key: "list_error", value: credentialSource.lastListError?.detail ?? "(none)" },
+      {
+        key: "failures",
+        value: joinOrNone(
+          credentialSource.failures.map((failure) =>
+            [failure.integrationId, failure.label, failure.category, failure.detail]
+              .map((part) => sanitizeSingleLineDisplayText(part))
+              .join(":"),
+          ),
+        ),
+      },
+    ]),
+  );
 
   for (const [id, providerId] of [
     ["openai", "openai"],
@@ -856,6 +889,7 @@ export async function buildQuotaStatusReport(params: {
         providerId,
         probes: params.providerLiveProbes,
         availability: params.providerAvailability,
+        homeDir,
       }),
     );
   }
@@ -864,12 +898,6 @@ export async function buildQuotaStatusReport(params: {
   const cursorRows: ReportKvRow[] = [];
   appendProviderStatusDetailRows(cursorRows, "cursor", params.providerLiveProbes);
 
-  appendProviderStatusDetailRows(
-    cursorRows,
-    "qwen-code",
-    params.providerLiveProbes,
-    new Set(["qwen free local quota"]),
-  );
   appendProviderStatusDetailRows(
     cursorRows,
     "alibaba-coding-plan",
@@ -881,19 +909,9 @@ export async function buildQuotaStatusReport(params: {
     "cursor",
     params.providerLiveProbes,
     params.providerAvailability,
+    homeDir,
   );
   sections.push(createKvSection("cursor", "cursor:", cursorRows));
-
-  const qwenCodeLiveProbeSection = createCompactLiveProbeOnlySection({
-    id: "qwen_code",
-    title: "qwen_code:",
-    providerId: "qwen-code",
-    probes: params.providerLiveProbes,
-    availability: params.providerAvailability,
-  });
-  if (qwenCodeLiveProbeSection) {
-    sections.push(qwenCodeLiveProbeSection);
-  }
 
   const alibabaCodingPlanLiveProbeSection = createCompactLiveProbeOnlySection({
     id: "alibaba_coding_plan",
@@ -901,9 +919,22 @@ export async function buildQuotaStatusReport(params: {
     providerId: "alibaba-coding-plan",
     probes: params.providerLiveProbes,
     availability: params.providerAvailability,
+    homeDir,
   });
   if (alibabaCodingPlanLiveProbeSection) {
     sections.push(alibabaCodingPlanLiveProbeSection);
+  }
+
+  const alibabaTokenPlanLiveProbeSection = createCompactLiveProbeOnlySection({
+    id: "alibaba_token_plan",
+    title: "alibaba_token_plan:",
+    providerId: "alibaba-token-plan",
+    probes: params.providerLiveProbes,
+    availability: params.providerAvailability,
+    homeDir,
+  });
+  if (alibabaTokenPlanLiveProbeSection) {
+    sections.push(alibabaTokenPlanLiveProbeSection);
   }
 
   for (const section of [
@@ -913,8 +944,14 @@ export async function buildQuotaStatusReport(params: {
       title: "minimax_china:",
       providerId: "minimax-china-coding-plan",
     },
-    { id: "kimi", title: "kimi:", providerId: "kimi-for-coding" },
-    { id: "opencode_go", title: "opencode_go:", providerId: "opencode-go" },
+    { id: "kimi", title: "kimi:", providerId: "kimi-code-plan-global" },
+    { id: "kimi_cn", title: "kimi_cn:", providerId: "kimi-code-plan-cn" },
+    {
+      id: "opencode_go",
+      title: "opencode_go:",
+      providerId: "opencode-go",
+      detailKeys: OPENCODE_GO_STATUS_DETAIL_KEYS,
+    },
     { id: "opencode_zen", title: "opencode_zen:", providerId: "opencode" },
     { id: "xiaomi", title: "xiaomi:", providerId: "xiaomi" },
     { id: "zai", title: "zai:", providerId: "zai" },
@@ -925,6 +962,7 @@ export async function buildQuotaStatusReport(params: {
     { id: "vilao", title: "vilao:", providerId: "vilao" },
     { id: "xai", title: "xai:", providerId: "xai", includeDetails: false },
     { id: "nanogpt", title: "nanogpt:", providerId: "nanogpt" },
+    { id: "openrouter", title: "openrouter:", providerId: "openrouter" },
     {
       id: "copilot_quota_auth",
       title: "copilot_quota_auth:",
@@ -936,6 +974,7 @@ export async function buildQuotaStatusReport(params: {
         ...section,
         probes: params.providerLiveProbes,
         availability: params.providerAvailability,
+        homeDir,
       }),
     );
   }
@@ -943,8 +982,14 @@ export async function buildQuotaStatusReport(params: {
   const llmGateDiag = await getLlmGateAuthDiagnostics();
   const llmGateRows: ReportKvRow[] = [
     { key: "quota_token_pair", value: llmGateDiag.configured ? "configured" : "(none)" },
-    { key: "access_token_metadata", value: llmGateDiag.accessTokenConfigured ? "configured" : "(none)" },
-    { key: "refresh_token_metadata", value: llmGateDiag.refreshTokenConfigured ? "configured" : "(none)" },
+    {
+      key: "access_token_metadata",
+      value: llmGateDiag.accessTokenConfigured ? "configured" : "(none)",
+    },
+    {
+      key: "refresh_token_metadata",
+      value: llmGateDiag.refreshTokenConfigured ? "configured" : "(none)",
+    },
     { key: "auth_paths", value: joinOrNone(llmGateDiag.authPaths) },
   ];
   appendProviderCompactLiveProbeRows(
@@ -952,6 +997,7 @@ export async function buildQuotaStatusReport(params: {
     "llmgate",
     params.providerLiveProbes,
     params.providerAvailability,
+    homeDir,
   );
   sections.push(createKvSection("llmgate", "llmgate:", llmGateRows));
 
@@ -963,32 +1009,10 @@ export async function buildQuotaStatusReport(params: {
         providerId: "kilo",
         probes: params.providerLiveProbes,
         availability: params.providerAvailability,
+        homeDir,
       }),
     );
   }
-
-  // === google antigravity + db path ===
-  const dbCandidates = getOpenCodeDbPathCandidates();
-  const dbSelected = getOpenCodeDbPath();
-  const dbPresent: string[] = [];
-  await Promise.all(
-    dbCandidates.map(async (p) => {
-      if (await pathExists(p)) dbPresent.push(p);
-    }),
-  );
-  const googleRows: ReportKvRow[] = [];
-  appendProviderStatusDetailRows(googleRows, "google-antigravity", params.providerLiveProbes);
-  googleRows.push({
-    key: "opencode db",
-    value: `preferred=${dbSelected} present=${joinOrNone(dbPresent)} candidates=${joinOrNone(dbCandidates)}`,
-  });
-  appendProviderCompactLiveProbeRows(
-    googleRows,
-    "google-antigravity",
-    params.providerLiveProbes,
-    params.providerAvailability,
-  );
-  sections.push(createKvSection("google_antigravity", "google_antigravity:", googleRows));
 
   for (const [id, providerId] of [
     ["google_gemini_cli", "google-gemini-cli"],
@@ -1001,28 +1025,8 @@ export async function buildQuotaStatusReport(params: {
         providerId,
         probes: params.providerLiveProbes,
         availability: params.providerAvailability,
+        homeDir,
       }),
-    );
-  }
-
-  if (params.googleRefresh?.attempted) {
-    const googleRefreshRows: ReportKvRow[] = [];
-    if (
-      typeof params.googleRefresh.total === "number" &&
-      typeof params.googleRefresh.successCount === "number"
-    ) {
-      googleRefreshRows.push({
-        key: "refreshed",
-        value: `${params.googleRefresh.successCount}/${params.googleRefresh.total}`,
-      });
-    } else {
-      googleRefreshRows.push({ key: "attempted" });
-    }
-    for (const f of params.googleRefresh.failures ?? []) {
-      googleRefreshRows.push({ key: f.email ?? "Unknown", value: f.error });
-    }
-    sections.push(
-      createKvSection("google_token_refresh", "google_token_refresh:", googleRefreshRows),
     );
   }
 
@@ -1199,11 +1203,17 @@ export async function buildQuotaStatusReport(params: {
   }
   sections.push(createKvSection("unknown_pricing", "unknown_pricing:", unknownRows));
 
-  return renderPlainTextReport({
-    heading: {
-      title: `Quota Status (opencode-quota v${v}) (/quota_status)`,
-      generatedAtMs: params.generatedAtMs,
+  // Users paste this report into public issues: show the home dir as "~" in every path
+  // so it does not reveal their computer's user name.
+  return replaceHomeDirWithTildeInDocument(
+    {
+      heading: commandHeading({
+        title: `Quota Status (opencode-quota v${v}) (/quota_status)`,
+        detail: `opencode-quota v${v}`,
+        generatedAtMs: params.generatedAtMs,
+      }),
+      sections,
     },
-    sections,
-  });
+    homeDir,
+  );
 }
