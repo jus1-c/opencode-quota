@@ -16,7 +16,7 @@ vi.mock("../src/lib/vilao.js", () => ({
 }));
 
 describe("vilao provider", () => {
-  it("keeps remaining and max amounts in the expanded percent label", async () => {
+  it("keeps remaining and baseline amounts in the single-window right summary", async () => {
     const { queryVilaoQuota } = await import("../src/lib/vilao.js");
     (queryVilaoQuota as any).mockResolvedValueOnce({
       success: true,
@@ -32,15 +32,15 @@ describe("vilao provider", () => {
       {
         name: "Vilao Balance",
         group: "Vilao",
-        label: ":: 40000 / 100000 ₫",
+        right: "40000 / 100000 ₫",
         percentRemaining: 40,
       },
     ]);
+    expect(out.presentation).toEqual({ singleWindowShowRight: true });
     expect(out.rawDetails).toEqual([
       { key: "balance", value: "40000 VND" },
       { key: "observed_baseline", value: "100000 VND" },
     ]);
-    expect(out.presentation).toBeUndefined();
   });
 
   it("matches Vilao model ids and uses PAT presence for availability", async () => {
