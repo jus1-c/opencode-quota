@@ -344,7 +344,7 @@ describe("buildSidebarQuotaPanelLines", () => {
     });
 
     const rendered = lines.join("\n");
-    expect(rendered).toContain("Weekly $22/$24");
+    expect(rendered).toMatch(/Weekly\s+\$22\/\$24/);
     expect(rendered).toContain("92% used");
     expect(rendered).not.toContain("0/500");
     expect(rendered).not.toContain("0% used");

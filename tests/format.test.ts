@@ -245,6 +245,49 @@ describe("formatQuotaRows", () => {
     expect(out).not.toMatch(/\d+[dhms]/);
   });
 
+  it("justifies a usage summary to both edges when the row has no reset", () => {
+    const out = formatQuotaRows({
+      version: "1.0.0",
+      layout: { maxWidth: 50, narrowAt: 42, tinyAt: 32 },
+      entries: [
+        {
+          name: "[Vilao]",
+          right: "40,000 / 100,000 ₫",
+          percentRemaining: 40,
+        },
+      ],
+    });
+
+    const lines = out.split("\n");
+    expect(lines[0]).toBe("[Vilao]                         40,000 / 100,000 ₫");
+    expect(lines[0]).toHaveLength(50);
+    expect(lines[0]).not.toContain(" -");
+    expect(lines[1]).toContain("40% left");
+  });
+
+  it("keeps the reset countdown ahead of a usage summary", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-15T10:00:00.000Z"));
+
+    const out = formatQuotaRows({
+      version: "1.0.0",
+      layout: { maxWidth: 50, narrowAt: 42, tinyAt: 32 },
+      entries: [
+        {
+          name: "[Copilot]",
+          right: "600/1000",
+          percentRemaining: 40,
+          resetTimeIso: "2026-01-15T12:14:00.000Z",
+        },
+      ],
+    });
+
+    const lines = out.split("\n");
+    expect(lines[0]).toContain("600/1000");
+    expect(lines[0]).toContain("2h14m");
+    expect(lines[0]).not.toContain(" -");
+  });
+
   it("uses precise reset labels for single-window rows by default", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-15T10:00:00.000Z"));

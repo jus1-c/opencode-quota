@@ -177,23 +177,28 @@ export function formatQuotaRows(params: {
     );
     const visibleBarSuffix = percentLabel.slice(0, percentValueCol);
     const summary = rightSummary?.trim() || "";
-    const leftText = summary ? `${name} ${summary}` : name;
 
     // Show reset countdown whenever quota is not fully available.
     // (i.e., any usage at all, or depleted)
-    const timeStr =
+    const countdown =
       remaining < 100
         ? formatResetCountdown(
             resetIso,
             isResetTimeDecimals(params.resetTimeDecimals)
               ? {
-                  missing: "-",
+                  missing: "",
                   compactRounded: true,
                   decimals: params.resetTimeDecimals,
                 }
-              : { missing: "-", spaced: params.resetTimeSpaced },
+              : { missing: "", spaced: params.resetTimeSpaced },
           )
         : "";
+
+    // A usage summary without a countdown takes the trailing column, so the row
+    // is justified to both edges instead of leaving a bare "-" placeholder.
+    const summaryInTrailing = Boolean(summary) && !countdown && !isTiny;
+    const leftText = summary && !summaryInTrailing ? `${name} ${summary}` : name;
+    const timeStr = countdown || (summary ? "" : remaining < 100 ? "-" : "");
 
     if (isTiny) {
       // In tiny mode: single line with name + time + percent
@@ -214,7 +219,15 @@ export function formatQuotaRows(params: {
 
     // Line 1: label + time can use the full available width. Prefer keeping the
     // reset text aligned, but shrink padding before truncating labels that fit.
-    if (params.wrapLabels && leftText.length > maxWidth) {
+    if (summaryInTrailing) {
+      const summaryWidth = maxWidth - separator.length - summary.length;
+      if (summaryWidth < 1) {
+        lines.push(name.slice(0, maxWidth));
+        lines.push(padLeft(summary, maxWidth));
+      } else {
+        lines.push((padRight(name, summaryWidth) + separator + summary).slice(0, maxWidth));
+      }
+    } else if (params.wrapLabels && leftText.length > maxWidth) {
       lines.push(...wrapDisplayText(leftText, maxWidth));
       if (timeStr) lines.push(padLeft(timeStr, maxWidth));
     } else if (
