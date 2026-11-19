@@ -411,6 +411,15 @@ describe("view text", () => {
     expect(balance).toContain("█");
     expect(balance).toContain("74%");
     expect(joined).toContain("\n 14,350.83 / 19,428.11 ₫");
+    // It is the row's figure, so it reads as a label and bold, not as a muted reset time.
+    const amounts = sidebarLines({
+      groups: groups("sidebar", [PAIR]),
+      ...drawn,
+      width: 50,
+    })
+      .flatMap((line) => line.segments)
+      .find((segment) => segment.text.includes("14,350.83"));
+    expect(amounts).toMatchObject({ role: "label", bold: true });
   });
 
   it("draws the expanded sidebar with bars, percents, reset times and session tokens", () => {

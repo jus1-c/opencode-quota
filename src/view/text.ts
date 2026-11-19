@@ -373,14 +373,21 @@ export function sidebarLines(input: SidebarInput): Line[] {
       ),
     };
     // A balance row's amount pair takes a line of its own, left-aligned with the row, so the
-    // pair reads whole instead of squeezing the bar or being cut at the panel's edge.
+    // pair reads whole instead of squeezing the bar or being cut at the panel's edge. It is the
+    // row's figure, not a reset time, so it is drawn as a label and bold instead of muted.
     if (row.amountPair) {
       return [
         line,
         {
           id: row.id,
           segments: clip(
-            [{ text: `${" ".repeat(layout.indent)}${row.amountPair}`, role: "value" }],
+            [
+              {
+                text: `${" ".repeat(layout.indent)}${row.amountPair}`,
+                role: "label",
+                bold: true,
+              },
+            ],
             width,
           ),
         },
@@ -849,7 +856,9 @@ function groupedToastLines(input: ToastInput): Line[] {
         ...(row.reset
           ? [{ text: afterPercent(row.reset, "  "), role: "reset" as const, percent }]
           : []),
-        ...(row.amountPair ? [{ text: `  ${row.amountPair}`, role: "value" as const }] : []),
+        ...(row.amountPair
+          ? [{ text: `  ${row.amountPair}`, role: "label" as const, bold: true }]
+          : []),
       ],
       row.paceLevel,
     );
@@ -913,9 +922,11 @@ function detailedToastLines(input: ToastInput): Line[] {
           ]
         : [{ text: percentWords.padStart(room), role: "percent", percent }];
     const trailing = row.reset || row.amountPair;
-    const nameLine = trailing
-      ? spread(name, { text: resetAlone(trailing), role: "reset", percent }, room)
-      : clip([name], room);
+    // The pair is the row's figure, not a reset time: drawn as a label and bold.
+    const trailingSegment: Segment = row.reset
+      ? { text: resetAlone(row.reset), role: "reset", percent }
+      : { text: resetAlone(row.amountPair ?? ""), role: "label", bold: true };
+    const nameLine = trailing ? spread(name, trailingSegment, room) : clip([name], room);
     return [
       { id: row.id, segments: withPaceLevel(nameLine, row.paceLevel) },
       { id: row.id, segments: withPaceLevel(clip(bar, room), row.paceLevel) },
