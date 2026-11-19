@@ -87,6 +87,12 @@ afterEach(async () => {
   vi.clearAllMocks();
 });
 
+// `vi.waitFor` gives up after 1 s, which a loaded machine misses when the wait covers a file watch
+// (debounce plus a reload) or a save round-trip. The per-test `testTimeout` still stops a hang.
+const waitFor = vi.waitFor.bind(vi);
+vi.waitFor = ((condition: () => unknown, options?: { timeout?: number }) =>
+  waitFor(condition, { timeout: 10_000, ...options })) as typeof vi.waitFor;
+
 afterAll(() => {
   rmSync(testHome, { recursive: true, force: true });
 });

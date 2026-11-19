@@ -620,10 +620,8 @@ describe("v6 surfaces on the quota snapshot", () => {
         file.statusLine = { detail: "one", withSidebar: true, window: { copilot: "month" } };
         file.words = { percent: "used" };
         await writeFile(path, JSON.stringify(file));
-        // The hand edit arrives through the file watch and its debounce; a loaded machine is slow.
-        await vi.waitFor(
-          () => expect(sidebar().join(" ")).toContain("Sidebar… ███░░░░░░░░░░░ 19%"),
-          { timeout: 10_000 },
+        await vi.waitFor(() =>
+          expect(sidebar().join(" ")).toContain("Sidebar… ███░░░░░░░░░░░ 19%"),
         );
         expect(sidebar()).toContain("▼ Quota used");
         expect(sidebar().join(" ")).not.toContain("Session 1.20K");
