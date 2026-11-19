@@ -71,12 +71,17 @@ describe("tui dist packaging", () => {
     expect(typeof packagedTui.default.setup).toBe("function");
   });
 
-  it("can load the packaged root module", async () => {
-    const mod = await import("../dist/index.js");
+  it(
+    "can load the packaged root module",
+    async () => {
+      const mod = await import("../dist/index.js");
 
-    expect(mod.default).toMatchObject({
-      id: "@slkiser/opencode-quota.server",
-    });
-    expect(typeof mod.default.setup).toBe("function");
-  });
+      expect(mod.default).toMatchObject({
+        id: "@slkiser/opencode-quota.server",
+      });
+      expect(typeof mod.default.setup).toBe("function");
+    },
+    // Importing the built bundle is slow while the whole suite runs in parallel.
+    60_000,
+  );
 });

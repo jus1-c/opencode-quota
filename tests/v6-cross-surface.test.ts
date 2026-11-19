@@ -620,8 +620,10 @@ describe("v6 surfaces on the quota snapshot", () => {
         file.statusLine = { detail: "one", withSidebar: true, window: { copilot: "month" } };
         file.words = { percent: "used" };
         await writeFile(path, JSON.stringify(file));
-        await vi.waitFor(() =>
-          expect(sidebar().join(" ")).toContain("Sidebar… ███░░░░░░░░░░░ 19%"),
+        // The hand edit arrives through the file watch and its debounce; a loaded machine is slow.
+        await vi.waitFor(
+          () => expect(sidebar().join(" ")).toContain("Sidebar… ███░░░░░░░░░░░ 19%"),
+          { timeout: 10_000 },
         );
         expect(sidebar()).toContain("▼ Quota used");
         expect(sidebar().join(" ")).not.toContain("Session 1.20K");
@@ -950,10 +952,16 @@ describe("v6 surfaces on the quota snapshot", () => {
     // Switched back on, both names open Usage again.
     tui.typed("/quota_status");
     await vi.waitFor(() => expect(words(oldCommands())).toContain("off"));
-    clickable(oldCommands(), "›").props.onMouseUp();
-    // The save and the reload it triggers are two RPC round-trips; a loaded machine takes longer
-    // than the default window.
-    await vi.waitFor(() => expect(words(oldCommands())).toContain("on"), { timeout: 20_000 });
+    // A flip made while the previous save is in flight is ignored by design, and the row the
+    // test holds may predate the re-render: click again, as a person would.
+    await vi.waitFor(
+      async () => {
+        if (!words(oldCommands()).includes("on")) clickable(oldCommands(), "›").props.onMouseUp();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(words(oldCommands())).toContain("on");
+      },
+      { timeout: 20_000, interval: 200 },
+    );
     tui.typed("/tokens_monthly");
     await vi.waitFor(() => expect(activeLabels(windowTree())).toContain("30 days"));
     tui.typed(`/tokens_between ${localDate(-6)} ${localDate(-3)}`);

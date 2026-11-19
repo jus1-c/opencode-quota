@@ -3,7 +3,7 @@
  * (defaults for what is missing or wrong), save a patch into it (comments kept), watch it for
  * edits, and convert the v5 settings into it once.
  */
-import { type FSWatcher, type Stats, unwatchFile, watch, watchFile } from "node:fs";
+import { type FSWatcher, type Stats, statSync, watch } from "node:fs";
 import { chmod, lstat, mkdir, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import {
@@ -533,9 +533,25 @@ export async function watchSettings(
     clearTimeout(timer);
     timer = setTimeout(() => void reload(true), debounceMs);
   };
-  // A poll also reports a missing file once, and an access time change; neither is an edit.
-  const onStat = (now: Stats, before: Stats) => {
-    if (now.mtimeMs !== before.mtimeMs || now.ino !== before.ino) schedule();
+  // A poll also reports a missing file once; that and an access time change are not edits. The
+  // size is compared too: a rewrite within the same millisecond keeps mtime and inode.
+  const statNow = (): Stats | undefined => {
+    try {
+      return statSync(path, { bigint: false });
+    } catch {
+      return undefined;
+    }
+  };
+  let lastStat = statNow();
+  const onStat = () => {
+    const now = statNow();
+    const changed =
+      now?.mtimeMs !== lastStat?.mtimeMs ||
+      now?.size !== lastStat?.size ||
+      now?.ino !== lastStat?.ino ||
+      !now !== !lastStat;
+    lastStat = now;
+    if (changed) schedule();
   };
 
   // In a read-only config folder, watch what exists.
@@ -549,15 +565,16 @@ export async function watchSettings(
   } catch {
     // A missing or unreadable folder: the stat poll still sees the file appear.
   }
-  watchFile(path, { interval: POLL_INTERVAL_MS, persistent: false }, onStat);
+  const poll = setInterval(onStat, POLL_INTERVAL_MS);
+  poll.unref();
   await reload(false);
 
   return {
     close() {
       closed = true;
       clearTimeout(timer);
+      clearInterval(poll);
       folderWatch?.close();
-      unwatchFile(path, onStat);
     },
   };
 }
