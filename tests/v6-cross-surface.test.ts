@@ -158,6 +158,8 @@ async function startHosts() {
     command: {
       transform: async (build: (editor: { add(command: ServerCommand): void }) => void) =>
         build({ add: (command) => serverCommands.push(command) }),
+      // The command list is built again from the transform; nothing to redo here.
+      reload: async () => {},
     },
     rpc: { register },
     integration: createFakeIntegration([]),
@@ -949,7 +951,9 @@ describe("v6 surfaces on the quota snapshot", () => {
     tui.typed("/quota_status");
     await vi.waitFor(() => expect(words(oldCommands())).toContain("off"));
     clickable(oldCommands(), "›").props.onMouseUp();
-    await vi.waitFor(() => expect(words(oldCommands())).toContain("on"), { timeout: 5_000 });
+    // The save and the reload it triggers are two RPC round-trips; a loaded machine takes longer
+    // than the default window.
+    await vi.waitFor(() => expect(words(oldCommands())).toContain("on"), { timeout: 20_000 });
     tui.typed("/tokens_monthly");
     await vi.waitFor(() => expect(activeLabels(windowTree())).toContain("30 days"));
     tui.typed(`/tokens_between ${localDate(-6)} ${localDate(-3)}`);
@@ -1024,7 +1028,7 @@ async function startServer() {
     location: { directory: process.cwd() },
     provider: { list: async () => ({ data: [{ id: "team-gateway", name: "team-gateway" }] }) },
     session: { get: async () => ({}), hook: vi.fn() },
-    command: { transform: vi.fn() },
+    command: { transform: vi.fn(), reload: async () => {} },
     rpc: { register },
     integration: createFakeIntegration([]),
     event: { subscribe: () => ({ async *[Symbol.asyncIterator]() {} }) },
