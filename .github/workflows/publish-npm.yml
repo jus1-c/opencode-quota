@@ -81,6 +81,7 @@ jobs:
     needs: release-package
 
     strategy:
+      fail-fast: true
       matrix:
         node-version: [22.x, 24.x]
 
@@ -191,8 +192,11 @@ jobs:
           npx --yes npm@^11.21.0 dist-tag add "$PACKAGE@$VERSION" next
 
   backfill-version:
+    # Runs after the dist-tag step (which skips on a prerelease) and only when the publish
+    # itself succeeded, so a failed release never leaves a version commit behind.
     runs-on: ubuntu-latest
-    needs: publish
+    needs: [publish, point-next-at-stable]
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
     permissions:
       contents: write
 

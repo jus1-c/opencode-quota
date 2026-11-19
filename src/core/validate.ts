@@ -35,7 +35,7 @@ export const LABEL_MAX_CODE_POINTS = 80;
 const TEXT_MAX_CODE_POINTS = 200;
 const ISO_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u;
 const COUNT_UNIT_RE = /^[a-z_]{1,32}$/u;
-const CUSTOM_SYMBOL_RE = /^[\p{L}\p{N}._-]{1,16}$/u;
+const CUSTOM_SYMBOL_RE = /^[\p{L}\p{N}\p{Sc}._-]{1,16}$/u;
 
 function isOneOf<T extends string>(value: unknown, choices: readonly T[]): value is T {
   return typeof value === "string" && (choices as readonly string[]).includes(value);

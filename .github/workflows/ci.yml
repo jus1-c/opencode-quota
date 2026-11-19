@@ -4,14 +4,22 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  pnpm-quality:
-    runs-on: ubuntu-latest
+  verify:
+    # One matrix, so a failure on either platform cancels the other at once instead of leaving
+    # it to finish a long install and test run.
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v6
@@ -33,50 +41,34 @@ jobs:
           run-install: |
             args: ["--frozen-lockfile"]
 
+      # The checks that do not depend on the operating system (format and lint,
+      # TypeScript lock check, v4 history check) run on Linux only.
       - name: Run canonical verification
+        if: runner.os == 'Linux'
         run: pnpm verify
 
+      - name: Run OS-dependent verification
+        if: runner.os == 'Windows'
+        run: pnpm run verify:platform
+
       - name: Pack and audit exact npm artifact once
+        if: runner.os == 'Linux'
         run: pnpm run pack:release-package package-artifacts
 
       - name: Upload exact npm artifact
+        if: runner.os == 'Linux'
         uses: actions/upload-artifact@v7
         with:
           name: package-tarball
           path: package-artifacts/*
           if-no-files-found: error
 
-  windows-verify:
-    runs-on: windows-latest
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Use Node.js 24.x
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24.x
-
-      # Installs Vite+ and the pnpm version in package.json `packageManager`, then
-      # `vp install --frozen-lockfile` with the pnpm store cached by lockfile hash.
-      - name: Install dependencies
-        uses: voidzero-dev/setup-vp@68f39c78aaf39be468cabd2afb09c162574c84af # v1.21.2
-        with:
-          node-manager: false
-          cache: true
-          run-install: |
-            args: ["--frozen-lockfile"]
-
-      # The checks that do not depend on the operating system (format and lint,
-      # TypeScript lock check, v4 history check) run in `pnpm-quality`.
-      - name: Run OS-dependent verification
-        run: pnpm run verify:platform
-
   runtime-smoke:
     runs-on: ubuntu-latest
-    needs: pnpm-quality
+    needs: verify
 
     strategy:
+      fail-fast: true
       matrix:
         node-version: [22.x, 24.x]
 

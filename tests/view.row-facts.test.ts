@@ -209,4 +209,25 @@ describe("row facts", () => {
       undefined,
     ]);
   });
+
+  it("shows a balance and its limit where a reset time would go", () => {
+    const row: QuotaRow = {
+      ...quotaRow("vilao.balance", { percentRemaining: 40 }),
+      type: "balance",
+      amount: { decimal: "40000", unit: { kind: "custom", symbol: "₫" } },
+      limit: { decimal: "100000", unit: { kind: "custom", symbol: "₫" } },
+    };
+    expect(factsOf(row).reset).toBe("40,000 / 100,000 ₫");
+    expect(factsOf(row).shortReset).toBe("40,000 / 100,000 ₫");
+  });
+
+  it("keeps a row's reset time ahead of a balance pair", () => {
+    const row: QuotaRow = {
+      ...quotaRow("vilao.balance", { percentRemaining: 40, resetsAt: at(90) }),
+      type: "balance",
+      amount: { decimal: "40000", unit: { kind: "custom", symbol: "₫" } },
+      limit: { decimal: "100000", unit: { kind: "custom", symbol: "₫" } },
+    };
+    expect(factsOf(row).reset).toBe("1h 30m");
+  });
 });

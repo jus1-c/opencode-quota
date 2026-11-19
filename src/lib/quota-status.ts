@@ -1145,6 +1145,10 @@ const DEBUG_DETAILS = {
   zai: {},
   zhipu: {},
   deepseek: {},
+  vilao: {
+    pat_metadata: oneOf("configured", "(none)"),
+    ...each(pathList, "auth_paths", "local_state_path"),
+  },
   xai: {},
   "minimax-coding-plan": { api_endpoint: oneOf("international", "china") },
   "minimax-china-coding-plan": { api_endpoint: oneOf("international", "china") },

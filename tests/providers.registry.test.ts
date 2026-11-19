@@ -22,7 +22,6 @@ const EXPECTED_PROVIDER_ORDER = [
   "kimi-code-plan-global",
   "kimi-code-plan-cn",
   "deepseek",
-  "llmgate",
   "vilao",
   "xai",
   "xiaomi",

@@ -9,6 +9,7 @@ import { type Pace, paceOf } from "../core/pace.js";
 import type { Words } from "../core/types.js";
 import { WINDOWS } from "../core/windows.js";
 import {
+  amountPairText,
   amountText,
   type DurationStyle,
   formatDuration,
@@ -162,6 +163,10 @@ export function rowFacts(item: VisibleRow, group: Pick<Group, "rows">, place: Pl
       : pace
         ? `${timeShare(pace, words)} ${percentStyleTime}`
         : percentStyleTime;
+  // A row with no reset time that reports a balance and the limit it is measured against shows
+  // the pair where the reset time would go, so the two numbers share one line with the bar.
+  const trailing =
+    reset === "" && row.amount && row.limit ? amountPairText(row.amount, row.limit) : reset;
   const level = pace && paceLevel(pace, percent);
   return {
     id: row.id,
@@ -169,8 +174,8 @@ export function rowFacts(item: VisibleRow, group: Pick<Group, "rows">, place: Pl
     percent,
     ...(level ? { paceLevel: level } : {}),
     value: percentText(words, percent, withWord),
-    reset,
-    shortReset: resetIn("short"),
+    reset: trailing,
+    shortReset: resetIn("short") || trailing,
     ...(place.evenUse && pace ? { evenLeft: pace.evenLeft } : {}),
     ...(pace && showsPace(pace, place.pace)
       ? {

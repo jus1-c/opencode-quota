@@ -421,46 +421,40 @@ describe("package manifest compatibility", () => {
   });
 
   it("runs canonical verification on Ubuntu, the OS-dependent part on Windows, before exact-artifact smoke", () => {
-    expect(Object.keys(ciWorkflow.jobs).sort()).toEqual([
-      "pnpm-quality",
-      "runtime-smoke",
-      "windows-verify",
-    ]);
-    const quality = ciWorkflow.jobs["pnpm-quality"];
-    const windows = ciWorkflow.jobs["windows-verify"];
-    expect(windows["runs-on"]).toBe("windows-latest");
-    // Only the Linux job runs the v4 history check, which needs the full history.
-    expect(usesStep(quality, "actions/checkout@v6")?.with?.["fetch-depth"]).toBe(0);
-    expect(usesStep(windows, "actions/checkout@v6")?.with).toBeUndefined();
-    for (const job of [quality, windows]) {
-      expect(usesStep(job, "actions/setup-node@v6")?.with?.["node-version"]).toBe("24.x");
-      expect(namedStep(job, "Install dependencies")).toEqual(
-        expect.objectContaining({
-          uses: SETUP_VP,
-          with: {
-            "node-manager": false,
-            cache: true,
-            "run-install": 'args: ["--frozen-lockfile"]\n',
-          },
-        }),
-      );
-      expect(job.steps?.some((step) => step.run?.includes("corepack"))).toBe(false);
-    }
-    expect(namedStep(quality, "Run canonical verification").run).toBe("pnpm verify");
-    expectCanonicalVerificationOnly(quality);
-    expect(namedStep(windows, "Run OS-dependent verification").run).toBe(
-      "pnpm run verify:platform",
+    // One matrix, so a failure on either platform cancels the other at once.
+    expect(Object.keys(ciWorkflow.jobs).sort()).toEqual(["runtime-smoke", "verify"]);
+    const verify = ciWorkflow.jobs["verify"];
+    expect(verify["runs-on"]).toBe("${{ matrix.os }}");
+    expect(verify.strategy?.["fail-fast"]).toBe(true);
+    expect(verify.strategy?.matrix?.os).toEqual(["ubuntu-latest", "windows-latest"]);
+    // Only the Linux leg runs the v4 history check, which needs the full history.
+    expect(usesStep(verify, "actions/checkout@v6")?.with?.["fetch-depth"]).toBe(0);
+    expect(usesStep(verify, "actions/setup-node@v6")?.with?.["node-version"]).toBe("24.x");
+    expect(namedStep(verify, "Install dependencies")).toEqual(
+      expect.objectContaining({
+        uses: SETUP_VP,
+        with: {
+          "node-manager": false,
+          cache: true,
+          "run-install": 'args: ["--frozen-lockfile"]\n',
+        },
+      }),
     );
-    expectSingleVerification(windows, "pnpm run verify:platform", [
-      VERIFY_COMMAND,
-      PLATFORM_COMMAND,
-    ]);
+    expect(verify.steps?.some((step) => step.run?.includes("corepack"))).toBe(false);
+
+    const linux = namedStep(verify, "Run canonical verification");
+    expect(linux.if).toBe("runner.os == 'Linux'");
+    expect(linux.run).toBe("pnpm verify");
+    // Each platform runs exactly one of the two verifications.
+    const windows = namedStep(verify, "Run OS-dependent verification");
+    expect(windows.if).toBe("runner.os == 'Windows'");
+    expect(windows.run).toBe("pnpm run verify:platform");
 
     const pack = "Pack and audit exact npm artifact once";
-    expect(namedStep(quality, pack).run).toBe("pnpm run pack:release-package package-artifacts");
-    expectOrdered(quality, ["Install dependencies", "Run canonical verification", pack]);
-    expectSinglePack(quality);
-    expect(namedStep(quality, "Upload exact npm artifact")).toEqual(
+    expect(namedStep(verify, pack).if).toBe("runner.os == 'Linux'");
+    expect(namedStep(verify, pack).run).toBe("pnpm run pack:release-package package-artifacts");
+    expectSinglePack(verify);
+    expect(namedStep(verify, "Upload exact npm artifact")).toEqual(
       expect.objectContaining({
         uses: "actions/upload-artifact@v7",
         with: expect.objectContaining({
@@ -472,7 +466,8 @@ describe("package manifest compatibility", () => {
     );
 
     const smoke = ciWorkflow.jobs["runtime-smoke"];
-    expect(smoke.needs).toBe("pnpm-quality");
+    expect(smoke.needs).toBe("verify");
+    expect(smoke.strategy?.["fail-fast"]).toBe(true);
     expect(smoke.strategy?.matrix?.["node-version"]).toEqual(["22.x", "24.x"]);
     expect(namedStep(smoke, "Download exact npm artifact").with).toEqual({
       name: "package-tarball",
@@ -491,6 +486,12 @@ describe("package manifest compatibility", () => {
       "Smoke exact npm artifact on Node ${{ matrix.node-version }}",
       globalInstall,
     ]);
+  });
+
+  it("stops a CI test run at the first failure", async () => {
+    // The runner gives up on the suite before the workflow's matrix fail-fast can see a failed job.
+    const config = await text("../vite.config.ts");
+    expect(config).toContain("bail: process.env.CI ? 1 : 0");
   });
 
   it("publishes only a release-tag artifact after both exact-artifact smoke jobs", () => {
@@ -550,6 +551,7 @@ describe("package manifest compatibility", () => {
     });
 
     expect(smoke.needs).toBe("release-package");
+    expect(smoke.strategy?.["fail-fast"]).toBe(true);
     expect(smoke.strategy?.matrix?.["node-version"]).toEqual(["22.x", "24.x"]);
     expect(namedStep(smoke, "Download exact release artifact").with).toEqual(artifact);
     expect(
@@ -579,7 +581,9 @@ describe("package manifest compatibility", () => {
       for (const step of checkouts) expect(step.with?.ref).toBe("${{ github.sha }}");
     }
 
-    expect(backfill.needs).toBe("publish");
+    // The version commit waits for the dist-tag step and only runs when the publish worked.
+    expect(backfill.needs).toEqual(["publish", "point-next-at-stable"]);
+    expect(backfill.if).toBe("${{ !cancelled() && needs.publish.result == 'success' }}");
     expect(backfill.permissions).toEqual({ contents: "write" });
     expect(namedStep(backfill, "Sync and verify version for repository backfill").run).toContain(
       "pnpm run verify:release-version",

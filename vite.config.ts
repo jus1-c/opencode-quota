@@ -49,6 +49,9 @@ export default defineConfig({
     environment: "node",
     include: ["tests/**/*.test.ts"],
     setupFiles: ["tests/setup.ts"],
+    // CI stops at the first failure: a run that is going to fail should not spend minutes on
+    // the rest of the suite. A local run keeps going so one pass shows every failure.
+    bail: process.env.CI ? 1 : 0,
     // Tests that run git, build, or open SQLite take 7-11 s on the Windows CI runner and on a
     // busy machine, past Vitest's 5 s default. A test that really hangs still fails.
     testTimeout: 30_000,

@@ -2,40 +2,50 @@ import { createHash } from "node:crypto";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { queryVilaoQuota, VILAO_PAT_METADATA_KEY } from "../src/lib/vilao.js";
+import { formatVilaoVnd, queryVilaoQuota, VILAO_PAT_METADATA_KEY } from "../src/lib/vilao.js";
 
 const mocks = vi.hoisted(() => ({
-  readAuthFile: vi.fn(),
+  readCredentialRows: vi.fn(),
 }));
 
 vi.mock("../src/lib/opencode-auth.js", () => ({
-  readAuthFile: mocks.readAuthFile,
+  readCredentialRows: mocks.readCredentialRows,
   getCredentialDatabasePaths: vi.fn(() => ["/tmp/opencode.db"]),
 }));
 
-function auth() {
+function credentialRow(overrides: { active?: boolean; metadata?: Record<string, unknown> } = {}) {
+  const active = overrides.active ?? true;
   return {
-    vilao: {
+    id: `vilao-${active ? "active" : "older"}`,
+    integrationId: "vilao",
+    label: "Vilao",
+    active,
+    value: {
       type: "api",
       key: "inference-key-must-not-be-used",
-      metadata: { [VILAO_PAT_METADATA_KEY]: "pat-secret" },
+      metadata: overrides.metadata ?? { [VILAO_PAT_METADATA_KEY]: "pat-secret" },
     },
   };
+}
+
+function onlyResult(read: Awaited<ReturnType<typeof queryVilaoQuota>>) {
+  expect(read).toHaveLength(1);
+  return read[0]!.result;
 }
 
 describe("vilao quota", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();
+    mocks.readCredentialRows.mockResolvedValue([credentialRow()]);
   });
 
-  it("ignores the inference key when PAT metadata is missing", async () => {
-    mocks.readAuthFile.mockResolvedValue({ vilao: { type: "api", key: "inference-key" } });
-    await expect(queryVilaoQuota()).resolves.toBeNull();
+  it("ignores a login without PAT metadata", async () => {
+    mocks.readCredentialRows.mockResolvedValue([credentialRow({ metadata: {} })]);
+    await expect(queryVilaoQuota()).resolves.toEqual([]);
   });
 
-  it("resets the baseline to 100 percent whenever the balance rises", async () => {
-    mocks.readAuthFile.mockResolvedValue(auth());
+  it("resets the baseline whenever the balance rises", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
@@ -64,28 +74,28 @@ describe("vilao quota", () => {
       nowMs: 123,
     };
 
-    await expect(queryVilaoQuota({}, dependencies)).resolves.toMatchObject({
+    expect(onlyResult(await queryVilaoQuota({}, dependencies))).toMatchObject({
       success: true,
-      balance: 100000,
-      baseline: 100000,
+      balanceCents: 10_000_000,
+      baselineCents: 10_000_000,
       percentRemaining: 100,
     });
-    await expect(queryVilaoQuota({}, dependencies)).resolves.toMatchObject({
+    expect(onlyResult(await queryVilaoQuota({}, dependencies))).toMatchObject({
       success: true,
-      balance: 40000,
-      baseline: 100000,
+      balanceCents: 4_000_000,
+      baselineCents: 10_000_000,
       percentRemaining: 40,
     });
-    await expect(queryVilaoQuota({}, dependencies)).resolves.toMatchObject({
+    expect(onlyResult(await queryVilaoQuota({}, dependencies))).toMatchObject({
       success: true,
-      balance: 80000,
-      baseline: 80000,
+      balanceCents: 8_000_000,
+      baselineCents: 8_000_000,
       percentRemaining: 100,
     });
-    await expect(queryVilaoQuota({}, dependencies)).resolves.toMatchObject({
+    expect(onlyResult(await queryVilaoQuota({}, dependencies))).toMatchObject({
       success: true,
-      balance: 60000,
-      baseline: 80000,
+      balanceCents: 6_000_000,
+      baselineCents: 8_000_000,
       percentRemaining: 75,
     });
     expect(saved).not.toContain("pat-secret");
@@ -98,7 +108,6 @@ describe("vilao quota", () => {
   });
 
   it("keeps a saved baseline from state written before lastBalanceCents existed", async () => {
-    mocks.readAuthFile.mockResolvedValue(auth());
     vi.stubGlobal(
       "fetch",
       vi.fn(
@@ -121,10 +130,10 @@ describe("vilao quota", () => {
 
     // No lastBalanceCents means the previous balance is unknown, so the read
     // cannot prove a rise and must keep the stored baseline.
-    await expect(queryVilaoQuota({}, dependencies)).resolves.toMatchObject({
+    expect(onlyResult(await queryVilaoQuota({}, dependencies))).toMatchObject({
       success: true,
-      balance: 50000,
-      baseline: 100000,
+      balanceCents: 5_000_000,
+      baselineCents: 10_000_000,
       percentRemaining: 50,
     });
     expect(JSON.parse(saved)).toMatchObject({
@@ -134,7 +143,6 @@ describe("vilao quota", () => {
   });
 
   it("rounds API float noise to currency cents", async () => {
-    mocks.readAuthFile.mockResolvedValue(auth());
     vi.stubGlobal(
       "fetch",
       vi.fn(
@@ -142,54 +150,64 @@ describe("vilao quota", () => {
           new Response(JSON.stringify({ data: { balance: 39742.238790000054 } }), { status: 200 }),
       ),
     );
-    const result = await queryVilaoQuota(
-      {},
-      {
-        readText: async () => {
-          throw Object.assign(new Error("missing"), { code: "ENOENT" });
+    const result = onlyResult(
+      await queryVilaoQuota(
+        {},
+        {
+          readText: async () => {
+            throw Object.assign(new Error("missing"), { code: "ENOENT" });
+          },
+          writeState: async () => {},
         },
-        writeState: async () => {},
-      },
+      ),
     );
-    expect(result).toMatchObject({ success: true, balance: 39742.24, baseline: 39742.24 });
+    expect(result).toMatchObject({
+      success: true,
+      balanceCents: 3_974_224,
+      baselineCents: 3_974_224,
+    });
   });
 
   it("returns a reconnect error when the PAT is rejected", async () => {
-    mocks.readAuthFile.mockResolvedValue(auth());
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => new Response("Unauthorized", { status: 401 })),
     );
-    const result = await queryVilaoQuota();
-    expect(result && !result.success ? result.error : "").toContain("Run /connect");
+    const result = onlyResult(await queryVilaoQuota());
+    expect(result.success ? "" : result.error).toContain("401");
   });
 
   it("redacts a PAT echoed by an API error", async () => {
-    mocks.readAuthFile.mockResolvedValue(auth());
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => new Response("bad pat-secret", { status: 500 })),
     );
-    const result = await queryVilaoQuota();
-    expect(result && !result.success ? result.error : "").toContain("[redacted]");
-    expect(result && !result.success ? result.error : "").not.toContain("pat-secret");
+    const result = onlyResult(await queryVilaoQuota());
+    const error = result.success ? "" : result.error;
+    expect(error).toContain("[redacted]");
+    expect(error).not.toContain("pat-secret");
   });
 
   it("does not overwrite malformed baseline state", async () => {
-    mocks.readAuthFile.mockResolvedValue(auth());
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => new Response(JSON.stringify({ data: { balance: 100 } }), { status: 200 })),
     );
     const writeState = vi.fn();
-    const result = await queryVilaoQuota(
-      {},
-      {
-        readText: async () => "not json",
-        writeState,
-      },
+    const result = onlyResult(
+      await queryVilaoQuota(
+        {},
+        {
+          readText: async () => "not json",
+          writeState,
+        },
+      ),
     );
-    expect(result && !result.success ? result.error : "").toBeTruthy();
+    expect(result.success ? "" : result.error).toBeTruthy();
     expect(writeState).not.toHaveBeenCalled();
+  });
+
+  it("formats đồng without decimals", () => {
+    expect(formatVilaoVnd(4_000_000)).toBe("40.000 ₫");
   });
 });

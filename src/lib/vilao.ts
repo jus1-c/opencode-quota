@@ -1,3 +1,11 @@
+/**
+ * Vilao balance client.
+ *
+ * Vilao has no quota windows: it holds a pay-as-you-go balance. The percentage is measured
+ * against the last balance this machine saw rise, so a top-up starts a new baseline and usage
+ * lowers the percentage from there. The state file keeps that baseline between runs.
+ */
+
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -5,17 +13,20 @@ import { join } from "node:path";
 import { writeJsonAtomic } from "./atomic-json.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import { clampPercent } from "./format-utils.js";
-import { fetchWithTimeout } from "./http.js";
-import { getCredentialDatabasePaths, readAuthFile } from "./opencode-auth.js";
+import { requestJson } from "./http.js";
+import {
+  type CredentialRow,
+  getCredentialDatabasePaths,
+  readCredentialRows,
+} from "./opencode-auth.js";
 import { getOpencodeRuntimeDirs, type OpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
-import type { QuotaError } from "./types.js";
 
 const BALANCE_URL = "https://vilao.ai/api/v2/account/balance";
 const STATE_VERSION = 1;
 const USER_AGENT = "OpenCode-Quota-Toast/1.0";
 export const VILAO_PAT_METADATA_KEY = "vilao_pat";
 
-type VilaoState = {
+export type VilaoState = {
   version: 1;
   accountFingerprint: string;
   baselineCents: number;
@@ -24,18 +35,17 @@ type VilaoState = {
   updatedAt: number;
 };
 
-export type VilaoQuotaResult =
+export type VilaoResult =
   | {
       success: true;
-      balance: number;
-      baseline: number;
+      balanceCents: number;
+      baselineCents: number;
       percentRemaining: number;
       statePath: string;
     }
-  | QuotaError
-  | null;
+  | { success: false; error: string };
 
-type VilaoDependencies = {
+export type VilaoDependencies = {
   runtimeDirs?: OpencodeRuntimeDirs;
   readText?: (path: string) => Promise<string>;
   writeState?: (path: string, state: VilaoState) => Promise<void>;
@@ -54,10 +64,24 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function patFromAuth(auth: unknown): string | undefined {
-  const entry = asRecord(asRecord(auth).vilao);
-  if (entry.type !== "api") return undefined;
-  return nonEmptyString(asRecord(entry.metadata)[VILAO_PAT_METADATA_KEY]);
+/** The PAT of a Vilao login; undefined for a login of another method or without one. */
+function patFromRow(row: CredentialRow): string | undefined {
+  if (row.value.type !== "api") return undefined;
+  // The database reader flattens metadata onto the value; the integration source keeps it
+  // under `metadata`.
+  return (
+    nonEmptyString(row.value[VILAO_PAT_METADATA_KEY]) ??
+    nonEmptyString(asRecord(row.value.metadata)[VILAO_PAT_METADATA_KEY])
+  );
+}
+
+/** Every Vilao login that holds a PAT. */
+export async function readVilaoPatLogins(): Promise<Array<{ row: CredentialRow; pat: string }>> {
+  const rows = await readCredentialRows(["vilao"], { methods: ["key"] });
+  return rows.flatMap((row) => {
+    const pat = patFromRow(row);
+    return pat ? [{ row, pat }] : [];
+  });
 }
 
 function cents(value: unknown): number | undefined {
@@ -66,12 +90,12 @@ function cents(value: unknown): number | undefined {
   return Math.round(amount * 100);
 }
 
-function statePath(accountFingerprint: string, runtimeDirs = getOpencodeRuntimeDirs()): string {
-  return join(runtimeDirs.stateDir, `quota-vilao-balance-${accountFingerprint}.json`);
-}
-
 function fingerprint(pat: string): string {
   return createHash("sha256").update(pat).digest("hex");
+}
+
+function statePath(accountFingerprint: string, runtimeDirs = getOpencodeRuntimeDirs()): string {
+  return join(runtimeDirs.stateDir, `quota-vilao-balance-${accountFingerprint}.json`);
 }
 
 async function updateBaseline(
@@ -147,49 +171,47 @@ function redactPat(text: string, pat: string): string {
   return sanitizeDisplayText(text.split(pat).join("[redacted]"));
 }
 
-export function formatVilaoVnd(value: number): string {
-  return `${new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 0 }).format(value)} VND`;
-}
-
-export async function queryVilaoQuota(
-  options: { requestTimeoutMs?: number } = {},
-  dependencies: VilaoDependencies = {},
-): Promise<VilaoQuotaResult> {
-  const pat = patFromAuth(await readAuthFile({ integrationIds: ["vilao"] }));
-  if (!pat) return null;
-
+/** The balance of one PAT, read and measured against its baseline. */
+async function queryOne(
+  pat: string,
+  requestTimeoutMs: number | undefined,
+  dependencies: VilaoDependencies,
+): Promise<VilaoResult> {
   try {
-    const balanceCents = await fetchWithTimeout(BALANCE_URL, {
-      request: {
-        method: "GET",
-        headers: {
-          Accept: "application/json",
-          Authorization: `Bearer ${pat}`,
-          "User-Agent": USER_AGENT,
-        },
+    const reply = await requestJson(BALANCE_URL, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${pat}`,
+        "User-Agent": USER_AGENT,
       },
-      timeoutMs: options.requestTimeoutMs,
-      consume: async (response) => {
-        if (response.status === 401 || response.status === 403) {
-          throw new Error("Vilao PAT was rejected. Run /connect to connect Vilao again.");
-        }
-        if (!response.ok) {
-          throw new Error(
-            `Vilao API error ${response.status}: ${sanitizeDisplaySnippet(redactPat(await response.text(), pat), 120)}`,
-          );
-        }
-        const balance = cents(asRecord(asRecord(await response.json()).data).balance);
-        if (balance === undefined) {
-          throw new Error("Vilao balance response returned an unexpected response shape");
-        }
-        return balance;
-      },
+      secrets: [pat],
+      timeoutMs: requestTimeoutMs,
     });
+    if (!reply.ok) {
+      const { failure } = reply;
+      return {
+        success: false,
+        error: redactPat(
+          failure.kind === "http"
+            ? `Vilao API error ${failure.status}: ${sanitizeDisplaySnippet(failure.detail, 120)}`
+            : failure.detail,
+          pat,
+        ),
+      };
+    }
+    const balanceCents = cents(asRecord(asRecord(reply.json).data).balance);
+    if (balanceCents === undefined) {
+      return {
+        success: false,
+        error: "Vilao balance response returned an unexpected response shape",
+      };
+    }
     const state = await updateBaseline(pat, balanceCents, dependencies);
     return {
       success: true,
-      balance: balanceCents / 100,
-      baseline: state.baselineCents / 100,
+      balanceCents,
+      baselineCents: state.baselineCents,
       percentRemaining:
         state.baselineCents === 0 ? 0 : clampPercent((balanceCents / state.baselineCents) * 100),
       statePath: state.path,
@@ -202,21 +224,19 @@ export async function queryVilaoQuota(
   }
 }
 
-export async function hasVilaoPat(): Promise<boolean> {
-  try {
-    return Boolean(patFromAuth(await readAuthFile({ integrationIds: ["vilao"] })));
-  } catch {
-    return false;
-  }
-}
-
-export async function getVilaoCacheIdentity(): Promise<string | undefined> {
-  try {
-    const pat = patFromAuth(await readAuthFile({ integrationIds: ["vilao"] }));
-    return pat ? fingerprint(pat) : undefined;
-  } catch {
-    return undefined;
-  }
+/** Reads the active Vilao balance, or null when no Vilao login holds a PAT. */
+export async function queryVilaoQuota(
+  options: { requestTimeoutMs?: number } = {},
+  dependencies: VilaoDependencies = {},
+): Promise<Array<{ pat: string; result: VilaoResult }>> {
+  const logins = await readVilaoPatLogins();
+  const read = await Promise.all(
+    logins.map(async ({ pat }) => ({
+      pat,
+      result: await queryOne(pat, options.requestTimeoutMs, dependencies),
+    })),
+  );
+  return read;
 }
 
 export async function getVilaoAuthDiagnostics(): Promise<{
@@ -224,12 +244,18 @@ export async function getVilaoAuthDiagnostics(): Promise<{
   authPaths: string[];
   statePath: string;
 }> {
-  const identity = await getVilaoCacheIdentity();
+  const logins = await readVilaoPatLogins();
+  const pat = logins[0]?.pat;
   return {
-    configured: Boolean(identity),
+    configured: logins.length > 0,
     authPaths: getCredentialDatabasePaths(),
-    statePath: identity
-      ? statePath(identity)
+    statePath: pat
+      ? statePath(fingerprint(pat))
       : join(getOpencodeRuntimeDirs().stateDir, "quota-vilao-balance-<account>.json"),
   };
+}
+
+/** The balance in đồng, whole: "40,000 ₫". */
+export function formatVilaoVnd(cents: number): string {
+  return `${new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 0 }).format(cents / 100)} ₫`;
 }

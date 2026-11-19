@@ -228,30 +228,12 @@ export const QUOTA_PROVIDER_REGISTRATION_SOURCE = [
     },
   },
   {
-    id: "llmgate",
-    label: "LLMGate",
-    runtimeIds: ["llmgate"],
-    synonyms: ["llm-gate"],
-    shape: {
-      autoSetup: "needs_quick_setup",
-      authentication: "opencode_auth_oauth_token",
-      quota: "remote_api",
-      quickSetupAnchor: "llmgate",
-      notes: "reads the LLMGate provider's access/refresh token pair from OpenCode auth metadata",
-    },
-  },
-  {
     id: "vilao",
     label: "Vilao",
     runtimeIds: ["vilao"],
     synonyms: [],
-    shape: {
-      autoSetup: "needs_quick_setup",
-      authentication: "opencode_auth_api_key",
-      quota: "remote_api",
-      quickSetupAnchor: "vilao",
-      notes: "pay-as-you-go balance relative to the last locally observed balance",
-    },
+    // Pay-as-you-go: one balance row, measured against the last balance seen here.
+    rowKeys: ["balance"],
   },
   {
     id: "xai",

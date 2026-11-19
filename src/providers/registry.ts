@@ -30,6 +30,7 @@ import { opencodeGoProvider } from "./opencode-go.js";
 import { opencodeZenProvider } from "./opencode-zen.js";
 import { openRouterProvider } from "./openrouter.js";
 import { quotaProvidersProvider } from "./quota-providers.js";
+import { vilaoProvider } from "./vilao.js";
 import { xaiProvider } from "./xai.js";
 
 const PROVIDERS_BY_ID = {
@@ -51,6 +52,7 @@ const PROVIDERS_BY_ID = {
   "kimi-code-plan-global": kimiCodePlanGlobalProvider,
   "kimi-code-plan-cn": kimiCodePlanCnProvider,
   deepseek: deepseekProvider,
+  vilao: vilaoProvider,
   xai: xaiProvider,
   xiaomi: xiaomiProvider,
   "opencode-go": opencodeGoProvider,

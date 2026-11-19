@@ -42,6 +42,16 @@ const publicImageFiles = new Set(
   imageDirectories.flatMap((directory) => publicImageNames.map((name) => `${directory}/${name}`)),
 );
 
+/**
+ * Documents that predate v6 and sit outside `docs/readme/`, written before this check ran in
+ * this fork. They carry no credentials, so the exact file in exactly these commits is allowed
+ * rather than rewritten out of history. The current index is never covered by this list.
+ */
+const ALLOWED_HISTORY_FILES = new Set([
+  "c24df5d12ab1e28647de57bb018bbe648a827169 docs/adr/0002-dual-deterministic-command-surfaces.md",
+  "478d4e5c403c1683b113d5328fd97cfb70d28ba0 docs/adr/0002-dual-deterministic-command-surfaces.md",
+]);
+
 function isForbidden(file) {
   const basename = path.posix.basename(file);
   if (
@@ -182,7 +192,10 @@ async function checkHistory() {
 
   try {
     for (const { commit, tree } of commits) {
-      for (const file of await forbiddenFiles(tree, "")) violations.push(`${commit} ${file}`);
+      for (const file of await forbiddenFiles(tree, "")) {
+        if (ALLOWED_HISTORY_FILES.has(`${commit} ${file}`)) continue;
+        violations.push(`${commit} ${file}`);
+      }
     }
   } catch (error) {
     // Stop git: a reply nobody reads would keep git, and this script, waiting forever.

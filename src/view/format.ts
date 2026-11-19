@@ -236,6 +236,31 @@ export function amountText(amount: Amount): string {
   return `${number} ${integer === "1" && !fraction ? unit.unit : `${unit.unit}s`}`;
 }
 
+/** The suffix an amount writes after its number, or "" for one written before it ("$12.40"). */
+function amountSuffix(amount: Amount): string {
+  const { unit } = amount;
+  if (unit.kind === "currency") return unit.code === "USD" ? "" : ` ${unit.code}`;
+  return unit.kind === "custom" ? ` ${unit.symbol}` : "";
+}
+
+/**
+ * Two amounts of the same unit as one pair, the unit written once: "40,000 / 100,000 ₫".
+ * Amounts of different units, or one written before its number, keep both: "$1.20 / 3.00 EUR".
+ */
+export function amountPairText(left: Amount, right: Amount): string {
+  const leftText = amountText(left);
+  const rightText = amountText(right);
+  const suffix = amountSuffix(left);
+  if (
+    suffix &&
+    JSON.stringify(left.unit) === JSON.stringify(right.unit) &&
+    leftText.endsWith(suffix)
+  ) {
+    return `${leftText.slice(0, -suffix.length)} / ${rightText}`;
+  }
+  return `${leftText} / ${rightText}`;
+}
+
 /** The value of a row without a percent: its text, amount, used/limit, or yes/no. */
 export function rowValueText(row: QuotaRow): string {
   if (row.text !== undefined) return row.text;
