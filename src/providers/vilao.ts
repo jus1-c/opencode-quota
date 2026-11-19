@@ -39,12 +39,15 @@ function vnd(cents: number): Amount {
   return { decimal, unit: VND };
 }
 
+/** The wallet glyph (Nerd Font) that stands for the balance row, in place of a word. */
+const BALANCE_ICON = "󰯝";
+
 /** The single balance row: what is left, the baseline it is measured against, and the share. */
 function balanceRow(result: Extract<VilaoResult, { success: true }>): ProviderRow {
   return {
     ...quotaRow({
       key: "balance",
-      label: "Balance",
+      label: BALANCE_ICON,
       percentRemaining: result.percentRemaining,
     }),
     type: "balance",

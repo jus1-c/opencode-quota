@@ -35,7 +35,8 @@ describe("vilao provider", () => {
     const fetched = await fetchRows(vilaoProvider);
 
     expect(fetched.rows.map((row) => row.id)).toEqual(["vilao.balance"]);
-    expect(fetched.rows[0]).toMatchObject({ label: "Balance", percentRemaining: 40 });
+    // The row name is the wallet glyph, so the sidebar shows no "Balance" word.
+    expect(fetched.rows[0]).toMatchObject({ label: "󰯝", percentRemaining: 40 });
     expect(fetched.rows[0]?.amount).toEqual({
       decimal: "40000",
       unit: { kind: "custom", symbol: "₫" },

@@ -386,6 +386,33 @@ describe("view text", () => {
     window: {},
   });
 
+  it("puts a balance row's amount pair on its own left-aligned line, keeping every other bar", () => {
+    const VND = { kind: "custom", symbol: "₫" } as const;
+    const PAIR = provider("vilao", "Vilao", [
+      row("vilao.balance", {
+        label: "󰯝",
+        type: "balance",
+        authority: "locally_derived",
+        percentRemaining: 74,
+        amount: { decimal: "14350.83", unit: VND },
+        limit: { decimal: "19428.11", unit: VND },
+      }),
+    ]);
+    const lines = sidebarLines({
+      groups: groups("sidebar", [CLAUDE, PAIR]),
+      ...drawn,
+      width: 50,
+    }).map(lineText);
+    const joined = lines.join("\n");
+    // The rows above keep their bars: the pair is not a reset time widening that column.
+    expect(lines.find((line) => line.trimStart().startsWith("5h")) ?? "").toContain("█");
+    // The row itself keeps its icon, bar and percent; the pair sits under it at the row's edge.
+    const balance = lines.find((line) => line.includes("󰯝")) ?? "";
+    expect(balance).toContain("█");
+    expect(balance).toContain("74%");
+    expect(joined).toContain("\n 14,350.83 / 19,428.11 ₫");
+  });
+
   it("draws the expanded sidebar with bars, percents, reset times and session tokens", () => {
     const lines = sidebarLines({
       groups: groups("sidebar"),

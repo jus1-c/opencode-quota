@@ -210,15 +210,16 @@ describe("row facts", () => {
     ]);
   });
 
-  it("shows a balance and its limit where a reset time would go", () => {
+  it("reports a balance and its limit as a pair, apart from the reset column", () => {
     const row: QuotaRow = {
       ...quotaRow("vilao.balance", { percentRemaining: 40 }),
       type: "balance",
       amount: { decimal: "40000", unit: { kind: "custom", symbol: "₫" } },
       limit: { decimal: "100000", unit: { kind: "custom", symbol: "₫" } },
     };
-    expect(factsOf(row).reset).toBe("40,000 / 100,000 ₫");
-    expect(factsOf(row).shortReset).toBe("40,000 / 100,000 ₫");
+    // Not a reset time: a long pair must not widen the column every row's bar shares.
+    expect(factsOf(row).reset).toBe("");
+    expect(factsOf(row).amountPair).toBe("40,000 / 100,000 ₫");
   });
 
   it("keeps a row's reset time ahead of a balance pair", () => {

@@ -66,6 +66,12 @@ export type RowFacts = {
   reset: string;
   /** The same in the short style ("2h", "4d 12h"), for a place short of room. */
   shortReset: string;
+  /**
+   * Two amounts a row reports, such as a balance and the limit it is measured against
+   * ("40,000 / 100,000 ₫"). A place shows it after the percent, never in the reset column: a
+   * long pair would widen that column and squeeze every row's bar.
+   */
+  amountPair?: string;
   /** Where even use would be (the percent it would leave now), when the place draws the mark. */
   evenLeft?: number;
   /** The pace words the place shows; `fast` when the row is used faster than it refills. */
@@ -164,9 +170,9 @@ export function rowFacts(item: VisibleRow, group: Pick<Group, "rows">, place: Pl
         ? `${timeShare(pace, words)} ${percentStyleTime}`
         : percentStyleTime;
   // A row with no reset time that reports a balance and the limit it is measured against shows
-  // the pair where the reset time would go, so the two numbers share one line with the bar.
-  const trailing =
-    reset === "" && row.amount && row.limit ? amountPairText(row.amount, row.limit) : reset;
+  // the pair after its percent. It is not a reset time, so it does not widen the reset column.
+  const amountPair =
+    reset === "" && row.amount && row.limit ? amountPairText(row.amount, row.limit) : undefined;
   const level = pace && paceLevel(pace, percent);
   return {
     id: row.id,
@@ -174,8 +180,9 @@ export function rowFacts(item: VisibleRow, group: Pick<Group, "rows">, place: Pl
     percent,
     ...(level ? { paceLevel: level } : {}),
     value: percentText(words, percent, withWord),
-    reset: trailing,
-    shortReset: resetIn("short") || trailing,
+    reset,
+    shortReset: resetIn("short"),
+    ...(amountPair ? { amountPair } : {}),
     ...(place.evenUse && pace ? { evenLeft: pace.evenLeft } : {}),
     ...(pace && showsPace(pace, place.pace)
       ? {

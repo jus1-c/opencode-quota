@@ -326,7 +326,7 @@ export function sidebarLines(input: SidebarInput): Line[] {
   const wanted = layout.barWidth === "fill" ? SIDEBAR_BAR_MOST : layout.barWidth;
   const barWidth = layout.bar === "none" ? 0 : Math.max(0, Math.min(wanted, width - fixed));
 
-  const rowLine = (row: RowFacts): Line => {
+  const rowLine = (row: RowFacts): Line[] => {
     const { percent } = row;
     if (percent === undefined) {
       const start = valueRowStart(
@@ -335,19 +335,21 @@ export function sidebarLines(input: SidebarInput): Line[] {
         row.id === "openai.codex_credits" ? columnsOf(row.name) : layout.labelWidth,
         barColumn,
       );
-      return {
-        id: row.id,
-        segments: clip(
-          [
-            { text: start, role: "label" },
-            { text: row.value, role: "value" },
-          ],
-          width,
-        ),
-      };
+      return [
+        {
+          id: row.id,
+          segments: clip(
+            [
+              { text: start, role: "label" },
+              { text: row.value, role: "value" },
+            ],
+            width,
+          ),
+        },
+      ];
     }
     const labelText = `${" ".repeat(layout.indent)}${fit(row.name, nameWidth)} `;
-    return {
+    const line: Line = {
       id: row.id,
       segments: clip(
         withPaceLevel(
@@ -355,13 +357,36 @@ export function sidebarLines(input: SidebarInput): Line[] {
             { text: labelText, role: "label", percent },
             ...barSegments(layout.bar, percent, barWidth, row.evenLeft, input.words),
             { text: row.value.padStart(5), role: "percent", percent },
-            { text: resetColumn(row.reset, resetWidth, input.words), role: "reset", percent },
+            ...(row.amountPair
+              ? []
+              : [
+                  {
+                    text: resetColumn(row.reset, resetWidth, input.words),
+                    role: "reset" as const,
+                    percent,
+                  },
+                ]),
           ],
           row.paceLevel,
         ),
         width,
       ),
     };
+    // A balance row's amount pair takes a line of its own, left-aligned with the row, so the
+    // pair reads whole instead of squeezing the bar or being cut at the panel's edge.
+    if (row.amountPair) {
+      return [
+        line,
+        {
+          id: row.id,
+          segments: clip(
+            [{ text: `${" ".repeat(layout.indent)}${row.amountPair}`, role: "value" }],
+            width,
+          ),
+        },
+      ];
+    }
+    return [line];
   };
 
   const lines: Line[] = [];
@@ -371,7 +396,7 @@ export function sidebarLines(input: SidebarInput): Line[] {
     }
     lines.push(groupLine(group, nowMs, width, true));
     for (const row of rows) {
-      lines.push(rowLine(row));
+      lines.push(...rowLine(row));
       if (!row.pace) continue;
       const text = `${" ".repeat(barColumn)}${row.pace.words}`;
       lines.push({ id: row.id, segments: clip([{ text, role: "warning" }], width) });
@@ -824,6 +849,7 @@ function groupedToastLines(input: ToastInput): Line[] {
         ...(row.reset
           ? [{ text: afterPercent(row.reset, "  "), role: "reset" as const, percent }]
           : []),
+        ...(row.amountPair ? [{ text: `  ${row.amountPair}`, role: "value" as const }] : []),
       ],
       row.paceLevel,
     );
@@ -874,6 +900,10 @@ function detailedToastLines(input: ToastInput): Line[] {
       const value: Segment = { text: row.value, role: "value" };
       return [{ id: row.id, segments: spread(name, value, room) }];
     }
+    if (percent === undefined) {
+      const value: Segment = { text: row.value, role: "value" };
+      return [{ id: row.id, segments: spread(name, value, room) }];
+    }
     const percentWords = row.value.padStart(percentWidth);
     const bar: Segment[] =
       barWidth >= TOAST_BAR_MIN
@@ -882,8 +912,9 @@ function detailedToastLines(input: ToastInput): Line[] {
             { text: `  ${percentWords}`, role: "percent", percent },
           ]
         : [{ text: percentWords.padStart(room), role: "percent", percent }];
-    const nameLine = row.reset
-      ? spread(name, { text: resetAlone(row.reset), role: "reset", percent }, room)
+    const trailing = row.reset || row.amountPair;
+    const nameLine = trailing
+      ? spread(name, { text: resetAlone(trailing), role: "reset", percent }, room)
       : clip([name], room);
     return [
       { id: row.id, segments: withPaceLevel(nameLine, row.paceLevel) },
